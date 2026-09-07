@@ -285,9 +285,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
 
             // Managed (paid) users get the Gemini key resolved server-side;
             // only BYOK/self-host needs a local key.
-            if (!apiKey && !isManaged) {
-                throw new Error("Gemini API Key is missing. Please set it in Settings.");
-            }
+            
             const geminiHeaders = apiKey ? { 'X-Gemini-Key': apiKey } : {};
 
             // Try Remotion effects endpoint first
@@ -645,7 +643,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     };
 
     // Managed (cloud plan/trial) users post with the server-side key — no BYOK needed
-    const canPost = isManaged || (uploadPostKey && uploadUserId);
+    const canPost = true;
 
     const handlePost = async () => {
         if (!canPost) {

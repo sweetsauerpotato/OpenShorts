@@ -44,7 +44,10 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
   // Managed (hosted plan): Gemini (script) + Upload-Post run server-side via the
   // bearer token — no BYOK Gemini key needed. fal.ai + ElevenLabs stay BYOK.
   const geminiHeader = geminiApiKey ? { 'X-Gemini-Key': geminiApiKey } : {};
-  const needsGeminiKey = !geminiApiKey && !managed;
+  // LOCAL FORK: both forced off — self-host resolves keys from .env server-side,
+  // so the browser has no way to know they exist. Do not restore.
+  const needsGeminiKey = false;
+  const needsUploadKey = false;
   // Wizard state
   const [step, setStep] = useState(() => {
     const cache = loadCache();
@@ -1379,7 +1382,7 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                   <div className="card p-4 space-y-3 mt-2">
                     <h3 className="eyebrow">Publish to Social Media</h3>
 
-                    {!uploadPostKey ? (
+                    {needsUploadKey ? (
                       <p className="text-xs lowercase text-muted">Set your Upload-Post API key in Settings to enable publishing.</p>
                     ) : (
                       <>

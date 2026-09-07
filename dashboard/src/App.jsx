@@ -705,7 +705,11 @@ function App() {
 
   // Hosted is paid-only (no BYOK core). Self-host uses BYOK keys.
   // `keysMissing` now means "self-host BYOK keys missing" — it never fires on hosted.
-  const keysMissing = !billingEnabled && (!apiKey || !uploadPostKey);
+  // LOCAL FORK: forced off. This install runs self-host with BILLING_ENABLED unset,
+  // so the backend resolves keys from .env (app.py `resolve_gemini` /
+  // `resolve_upload_post`). The browser never sees them, so the UI check only
+  // blocked requests the server could have served. Do not restore.
+  const keysMissing = false;
   const needsPlan = billingEnabled && !isManaged;   // hosted, signed-out or no active plan/trial
 
   // Fresh sign-up: show the welcome plan-choice popup once (AuthContext set the
