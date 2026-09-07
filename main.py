@@ -23,6 +23,7 @@ from google.genai import types as genai_types
 
 import gemini_worker
 import layout_picker
+import llm_provider
 from clip_selection import (build_transcript_windows, clip_count_targets,
                             clip_duration_bounds, snap_clip_to_words,
                             trim_to_best)
@@ -1517,14 +1518,12 @@ def get_viral_clips(transcript_result, video_duration):
     the expensive detail reasoning focused on the shortlist. Cuts are snapped to
     word boundaries so clips don't start/end mid-word.
     """
-    print("\U0001f916  Analyzing with Gemini (2-pass: score → detail)...")
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        print("❌ Error: GEMINI_API_KEY not found in environment variables.")
-        return None
-
-    client = genai.Client(api_key=api_key)
-    model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
+    print("\U0001f916  Analyzing transcript (2-pass: score → detail)...")
+    # Provider choice lives in llm_provider: local Ollama by default, Gemini
+    # when it is the only one that can serve. A missing key is no longer fatal
+    # here — make_client raises with the actual remedy when NEITHER is usable,
+    # which beats the generic "Clip detection failed" this used to produce.
+    client, model_name = llm_provider.make_client()
     language = str(transcript_result.get('language') or 'unknown')
     print(f"\U0001f916  Model: {model_name} | language: {language}")
 

@@ -30,6 +30,7 @@ from pydantic import BaseModel
 from s3_uploader import upload_job_artifacts, list_all_clips, upload_actor_to_s3, list_actor_gallery, upload_video_to_gallery, list_video_gallery
 import recut
 import layout_ranges
+import llm_provider
 
 load_dotenv()
 
@@ -197,6 +198,19 @@ def resolve_post_profile(forced_profile: Optional[str], client_profile: Optional
     return profile
 
 
+async def llm_available_without_key() -> bool:
+    """Self-host only: a reachable local model makes the API key optional.
+
+    Gated on ``not BILLING_ENABLED`` on purpose. In cloud mode a ``None`` from
+    ``resolve_gemini`` means "no active plan" (see there), so treating a local
+    provider as sufficient would let an unentitled user spend the operator's
+    hardware. Self-host has no user model and the caller owns the machine.
+    """
+    if BILLING_ENABLED:
+        return False
+    return await llm_provider.local_available_async()
+
+
 def gemini_missing_error():
     """The right 4xx when no Gemini key could be resolved.
 
@@ -208,7 +222,12 @@ def gemini_missing_error():
             "error": "no_plan",
             "message": "This action needs an active plan. Choose a plan or add your own API key.",
         })
-    return HTTPException(status_code=400, detail="Missing X-Gemini-Key header")
+    # Self-host has two ways out, and naming only the key used to send a user
+    # who is deliberately running keyless to do the one thing they are avoiding.
+    return HTTPException(status_code=400, detail=(
+        "No AI provider available. Either start Ollama and pull the model "
+        "(ollama pull qwen2.5:7b-instruct), or set GEMINI_API_KEY / send an "
+        "X-Gemini-Key header."))
 
 
 # Probe rate limiter. In-memory, resets on restart by design — the hard monthly
@@ -2117,7 +2136,7 @@ async def process_endpoint(
     upload_id: Optional[str] = Form(None),
 ):
     api_key = await resolve_gemini(request)
-    if not api_key:
+    if not api_key and not await llm_available_without_key():
         raise gemini_missing_error()
 
     ack_flag = str(acknowledged).lower() in ("1", "true", "yes")
@@ -2241,7 +2260,16 @@ async def process_endpoint(
     # probe above already gets this right.
     cmd = [sys.executable, "-u", "main.py"] # -u for unbuffered
     env = os.environ.copy()
-    env["GEMINI_API_KEY"] = api_key # Override with key from request
+    # Guarded: os.environ.copy() is a plain dict, so assigning None succeeds
+    # here and then Popen dies with "TypeError: str expected, not NoneType" —
+    # a confusing crash at job start on the keyless local path.
+    if api_key:
+        env["GEMINI_API_KEY"] = api_key # Override with key from request
+    else:
+        # The gate above passed on the local provider, so pin that decision for
+        # the child instead of letting it re-resolve: if Ollama blinks in
+        # between, we want the job's error to say so, not a silent swap.
+        env["LLM_PROVIDER"] = "ollama"
     # The stdio fix above only covers this process. main.py prints an emoji on
     # its first line and configures nothing, so on a cp1252 console the child
     # still dies before it renders anything -- the server starts and every job

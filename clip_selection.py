@@ -13,6 +13,10 @@ MODEL_PRICES = {
     "gemini-2.5-flash-lite": (0.10, 0.40),
     "gemini-2.5-flash": (0.30, 2.50),
     "gemini-2.0-flash": (0.10, 0.40),  # deprecated (shut down 2026-06-01)
+    # Local inference via Ollama. llm_provider.make_client prefixes the model
+    # name with "ollama/" so the prefix match below reports the honest $0
+    # instead of falling through to gemini_worker's estimated-price path.
+    "ollama/": (0.0, 0.0),
 }
 
 

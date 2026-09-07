@@ -4,7 +4,51 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-OpenShorts is an AI-powered vertical video generator that transforms long YouTube videos or local uploads into viral-ready short clips (9:16 format) for TikTok, Instagram Reels, and YouTube Shorts. Uses Google Gemini 3.1 Flash-Lite (`gemini-3.1-flash-lite`, overridable with `GEMINI_MODEL`) for viral moment detection and title generation.
+OpenShorts is an AI-powered vertical video generator that transforms long YouTube videos or local uploads into viral-ready short clips (9:16 format) for TikTok, Instagram Reels, and YouTube Shorts. Viral moment detection and title generation run on Google Gemini 3.1 Flash-Lite (`gemini-3.1-flash-lite`, overridable with `GEMINI_MODEL`) **or on a local Ollama** — see "Clip-selection provider" below.
+
+### Clip-selection provider (`llm_provider.py`)
+
+**The whole video→shorts pipeline depends on exactly one model call.**
+Transcription (faster-whisper), shot detection (TransNetV2), face/person
+tracking (MediaPipe + YOLOv8), reframing, subtitles and hooks are all local.
+The only critical-path AI call is `main.get_viral_clips`, and it is **text-only
+with a Pydantic JSON schema** — which is why a 7B local model can serve it.
+
+`LLM_PROVIDER` (`auto` default) picks between them: Ollama when it answers *and*
+`OLLAMA_MODEL` is actually pulled, else Gemini when a key exists, else a raise
+naming both remedies. Checking the model list matters — a reachable daemon
+without the model turns every generation into a 404 at job time.
+
+`OllamaClient` **duck-types the google-genai surface**
+(`client.models.generate_content(...)` → `.parsed`/`.text`/`.candidates`/
+`.usage_metadata`) rather than introducing a neutral interface. That is
+deliberate: `main._run_gemini_stage` and `_run_stage_split` encode two
+production incidents in their retry and bisect logic, and their tests inject
+exactly that shape. Matching it means the swap is one line at the construction
+site and **all 754 existing tests pass unmodified**. Consequences worth keeping:
+
+- The response has **no `prompt_feedback`** and empty `candidates`, so
+  `gemini_worker.raise_if_blocked` no-ops and the content-policy bisect is
+  never reached. Ollama has no content policy; "never fires" is correct.
+- Errors are raised with text the retry loop already matches (`503`,
+  `UNAVAILABLE`, `empty response body`). Deterministic failures — a missing
+  model (404) or a truncated answer (`done_reason=length`) — deliberately carry
+  **no** matching token, so they fail in 2s instead of after 35s of backoff.
+- Native `/api/chat`, not the OpenAI-compatible `/v1`, because `options.num_ctx`
+  is native-only. Without it Ollama uses the server default (possibly 4096) and
+  **silently truncates** a 3-4k-token prompt — no error, just a model scoring
+  windows it never read. The shim always sends it and warns above 90% use.
+- Local runs report the model as `ollama/<name>`; `clip_selection.MODEL_PRICES`
+  has an `"ollama/"` prefix entry so cost reports an honest $0.
+
+Measured: a batch of 8 scoring windows is ~2.7k tokens, so 8192 context is
+ample; qwen2.5:7b-instruct occupies ~5.3GB VRAM. Budget +3-5 min per job versus
+Gemini. Do not parallelise the batches — one GPU, Ollama serialises anyway.
+
+**Still Gemini-only** (no local equivalent, all already degrade without a key):
+silent/sparse-speech clip selection (`get_visual_clips` uploads the whole
+video), `/api/edit` and `/api/effects/generate`, thumbnail image generation,
+SaaSShorts research (Google Search grounding).
 
 ## Development Commands
 

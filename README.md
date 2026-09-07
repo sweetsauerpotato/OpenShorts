@@ -406,7 +406,7 @@ lives in [`examples/n8n/`](examples/n8n/).
 **Client-side (encrypted in localStorage):**
 | Key | Description |
 |-----|------------|
-| `GEMINI_API_KEY` | Google Gemini — required |
+| `GEMINI_API_KEY` | Google Gemini — optional when a local Ollama serves clip selection (see `LLM_PROVIDER` in `.env.example`); still required for silent-video clips, AI effects, thumbnails and SaaSShorts research |
 | `FAL_KEY` | fal.ai — required for AI Shorts |
 | `ELEVENLABS_API_KEY` | ElevenLabs — required for voiceover/dubbing |
 | `UPLOAD_POST_API_KEY` | Upload-Post — required, for social posting |
