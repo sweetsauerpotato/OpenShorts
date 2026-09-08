@@ -244,6 +244,12 @@ CLIP RULES:
 - Return only valid JSON.
 - Each clip must be {min_secs:g} to {max_secs:g} seconds long, in absolute seconds from the start of the source video.
 - Stay within the candidate window boundaries.
+- A CLIP IS AN EXCERPT INSIDE A WINDOW, NEVER THE WINDOW ITSELF. The candidate
+  windows are ~90 seconds; a clip is {min_secs:g}-{max_secs:g}. So `start` and `end` must
+  NOT be the window's own start and end — copying those back is always wrong,
+  even when the whole window is interesting. Find the strongest
+  {min_secs:g}-{max_secs:g}s stretch inside it and cut there. Check before you answer:
+  end - start must be between {min_secs:g} and {max_secs:g}.
 - THE 2-SECOND RULE: the clip MUST open on its strongest moment. If the first
   2 seconds would not stop a cold viewer from scrolling, move the start or skip the clip.
 - Start slightly before the hook and end slightly after the payoff when possible.
@@ -273,7 +279,10 @@ HOOK PLAYBOOK — pick the strongest fitting pattern for `viral_hook_text` (max 
 - Number / fact shock: "97% of people miss this."
 - Story loop: "This one email almost ruined me."
 - POV / pattern interrupt: "POV: you finally understand it."
-(These are English PATTERNS — always write the actual hook in TRANSCRIPT_LANGUAGE.)
+(These are PATTERNS to imitate, NOT text to reuse. Never output one of the five
+example sentences above, or any variation of them — they are about other videos.
+A hook that could be pasted onto a different video is a failed hook: name the
+specific thing THIS clip reveals. Always write it in TRANSCRIPT_LANGUAGE.)
 
 COPY RULES — ALL text fields (descriptions, title, hook) MUST be written in TRANSCRIPT_LANGUAGE ({language}):
 - Descriptions (TikTok + Instagram): 1-2 punchy sentences that tease the payoff
