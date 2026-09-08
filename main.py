@@ -1574,6 +1574,35 @@ def get_viral_clips(transcript_result, video_duration):
         # --- Pass 2: detailed clip extraction on the shortlist ---
         min_clips, max_clips = clip_count_targets(len(shortlist))
 
+        # Pass 2 gets the same windows with a timestamp on every sentence.
+        # Scoring does not need them (it judges a window as a whole), so they
+        # are added here only — 7 of the 8 calls stay the size they were.
+        #
+        # Why they are needed: the scoring payload carries one text blob and the
+        # window's own start/end, so choosing a cut INSIDE it means inventing a
+        # number by estimating how far into ~1800 characters a moment falls.
+        # Gemini does that well enough; qwen2.5:7b-instruct could not and
+        # returned the window's own bounds as the clip on 6 of 6 clips, twice
+        # in a row, including after the prompt was changed to forbid exactly
+        # that (measured 8-sep-2026 on a 55-min source). It was never a wording
+        # problem — the number the model needed was not in its input. With these
+        # lines the cut is a value it can read off the page instead.
+        segments = [(float(s.get("start", 0)), str(s.get("text") or "").strip())
+                    for s in transcript_result.get("segments", [])
+                    if str(s.get("text") or "").strip()]
+
+        def _detail_payload(ws):
+            out = []
+            for w in ws:
+                lines = [f"[{start:.1f}] {text}" for start, text in segments
+                         if w["start"] - 0.01 <= start < w["end"]]
+                out.append({"id": w["id"], "start": w["start"], "end": w["end"],
+                            # Fall back to the blob if a window somehow spans no
+                            # segment start, so the call degrades instead of
+                            # sending an empty window.
+                            "lines": lines or [w["text"]]})
+            return out
+
         def _detail_prompt(ws):
             # A split batch keeps the full clip-count band: a short list can
             # still hold the best clips, and the model returns fewer anyway.
@@ -1581,7 +1610,7 @@ def get_viral_clips(transcript_result, video_duration):
                 video_duration=video_duration, language=language,
                 min_clips=min_clips, max_clips=max_clips,
                 min_secs=min_secs, max_secs=max_secs,
-                windows_json=json.dumps(_payload(ws), ensure_ascii=False))
+                windows_json=json.dumps(_detail_payload(ws), ensure_ascii=False))
 
         shorts = _run_stage_split(client, model_name, shortlist, _detail_prompt,
                                   gemini_worker.DetailResponse, "shorts", costs, "detail")

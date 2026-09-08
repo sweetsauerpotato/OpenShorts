@@ -250,6 +250,15 @@ CLIP RULES:
   even when the whole window is interesting. Find the strongest
   {min_secs:g}-{max_secs:g}s stretch inside it and cut there. Check before you answer:
   end - start must be between {min_secs:g} and {max_secs:g}.
+- HOW TO PICK THE CUT: each window's `lines` are its sentences, every one
+  prefixed with the absolute second it is spoken, like
+  "[912.4] But here's the part everyone skips over".
+  READ THE TIMESTAMPS OFF THESE LINES — never estimate a number.
+  `start` = the timestamp of the line you open on.
+  `end`   = the timestamp of the line just AFTER the one you close on
+            (or the window's `end` when you close on its last line).
+  Choose the opening and closing lines so that end - start lands between
+  {min_secs:g} and {max_secs:g} seconds.
 - THE 2-SECOND RULE: the clip MUST open on its strongest moment. If the first
   2 seconds would not stop a cold viewer from scrolling, move the start or skip the clip.
 - Start slightly before the hook and end slightly after the payoff when possible.
