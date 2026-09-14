@@ -144,3 +144,103 @@ def test_clean_response_is_not_flagged_as_blocked():
         candidates = []
 
     gemini_worker.raise_if_blocked(_Resp())  # must not raise
+
+
+# --- 503 overload, replayed through the REAL google-genai client -------------------
+# 14-sep-2026: 8 of the calls in 10 harness runs hit Gemini's 503 "high demand";
+# one was still overloaded after the old 15 s of retrying and failed its run.
+# These feed the real SDK the body Gemini actually sent, over a fake transport,
+# so the error type, its code and the parsed success are the real ones.
+
+import json  # noqa: E402
+
+BODY_503 = {"error": {"code": 503, "status": "UNAVAILABLE", "message":
+                      "This model is currently experiencing high demand. Spikes in demand "
+                      "are usually temporary. Please try again later."}}
+BODY_429 = {"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "message": "Quota exceeded."}}
+BODY_OK = {"candidates": [{"index": 0, "finishReason": "STOP", "content": {"role": "model", "parts": [
+               {"text": json.dumps({"windows": [{"id": "window_001", "start": 0.0, "end": 90.0,
+                                                 "score": 80, "reason": "r"}]})}]}}],
+           "usageMetadata": {"promptTokenCount": 1000, "candidatesTokenCount": 50}}
+
+
+def _sdk_client(answers):
+    """A real genai.Client whose HTTP answers are ``answers`` in order, the last repeating."""
+    import httpx
+    from google import genai
+    from google.genai import types as genai_types
+
+    requests = []
+
+    def handler(request):
+        status, body = answers[min(len(requests), len(answers) - 1)]
+        requests.append(request)
+        return httpx.Response(status, json=body)
+
+    client = genai.Client(api_key="test-key", http_options=genai_types.HttpOptions(
+        httpx_client=httpx.Client(transport=httpx.MockTransport(handler))))
+    return client, requests
+
+
+@pytest.fixture()
+def sleeps(monkeypatch):
+    slept = []
+    monkeypatch.setattr(main.time, "sleep", slept.append)
+    monkeypatch.setattr(main.random, "uniform", lambda a, b: 1.0)  # no jitter
+    monkeypatch.delenv("GEMINI_OVERLOAD_WAIT_SECONDS", raising=False)
+    return slept
+
+
+def _score_stage(client):
+    import gemini_worker
+    return main._run_gemini_stage(client, "gemini-3.1-flash-lite", "prompt",
+                                  gemini_worker.ScoreResponse)
+
+
+def test_a_503_burst_longer_than_the_old_budget_now_recovers(sleeps, capsys):
+    client, requests = _sdk_client([(503, BODY_503)] * 4 + [(200, BODY_OK)])
+    parsed, cost = _score_stage(client)
+    assert parsed["windows"][0]["score"] == 80 and cost["input_tokens"] == 1000
+    assert len(requests) == 5
+    assert sleeps == [5, 10, 20, 40]
+    assert "Gemini answered after 4 overload retries (75s of waiting)" in capsys.readouterr().out
+
+
+def test_a_503_that_outlasts_the_budget_fails_with_the_real_reason(sleeps):
+    import gemini_worker
+    client, requests = _sdk_client([(503, BODY_503)])
+    with pytest.raises(gemini_worker.GeminiOverloadedError) as exc:
+        _score_stage(client)
+    assert sleeps == [5, 10, 20, 40, 60, 45]
+    assert len(requests) == 7
+    assert "Nothing is wrong with this video" in str(exc.value)
+    assert exc.value.__cause__.code == 503
+
+
+def test_the_wait_budget_comes_from_the_environment(sleeps, monkeypatch):
+    import gemini_worker
+    monkeypatch.setenv("GEMINI_OVERLOAD_WAIT_SECONDS", "15")
+    client, requests = _sdk_client([(503, BODY_503)])
+    with pytest.raises(gemini_worker.GeminiOverloadedError):
+        _score_stage(client)
+    assert sleeps == [5, 10] and len(requests) == 3
+
+
+def test_a_rate_limit_keeps_three_attempts(sleeps):
+    from google.genai import errors
+    client, requests = _sdk_client([(429, BODY_429)])
+    with pytest.raises(errors.ClientError):
+        _score_stage(client)
+    assert sleeps == [5, 10] and len(requests) == 3
+
+
+def test_get_viral_clips_reports_the_overload_instead_of_no_clips(sleeps, monkeypatch):
+    import gemini_worker
+    monkeypatch.setenv("GEMINI_OVERLOAD_WAIT_SECONDS", "0")
+    client, _ = _sdk_client([(503, BODY_503)])
+    monkeypatch.setattr(main.llm_provider, "make_client", lambda: (client, "gemini-3.1-flash-lite"))
+    transcript = {"language": "en", "segments": [
+        {"start": i * 25.0, "end": i * 25.0 + 25.0, "text": f"part {i}",
+         "words": [{"word": "part", "start": i * 25.0, "end": i * 25.0 + 1.0}]} for i in range(12)]}
+    with pytest.raises(gemini_worker.GeminiOverloadedError):
+        main.get_viral_clips(transcript, 300.0)

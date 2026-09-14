@@ -111,9 +111,21 @@ echo, band violations, copied playbook hooks, windows scored, score bands,
 shortlist ties and overlap, tokens per stage, run-to-run agreement, and
 on-topic clips with `--instructions` / `--topic-keywords`. Keep sources in
 `.cache/harness/`, never `uploads/` (deleted after 6 h, transcript cache
-included). A 55-min run costs ~1.5 cents. Gemini 503s ("high demand") hit 6 of
-10 runs on 14-sep-2026 and failed one, because `_run_gemini_stage` gives up
-after ~15 s of backoff; a real job fails the same way.
+included). A 55-min run costs ~1.5 cents.
+
+**Gemini 503 "high demand" gets a long retry.** It hit 8 calls in 10 harness
+runs on 14-sep-2026: 6 went through after one retry, 1 after two, and 1 was
+still overloaded after the old budget (3 attempts, 15 s of waiting) and failed
+its run. A default google-genai client does not retry at all (`retry_options` is
+None), so `_run_gemini_stage` is the only retry. A 503 now backs off 5, 10, 20,
+40, 60... s (±20% jitter) for up to `GEMINI_OVERLOAD_WAIT_SECONDS` (180) of
+waiting, then raises `GeminiOverloadedError`, which `get_viral_clips` re-raises
+so the job says Gemini was overloaded instead of "did not return usable clips".
+Rate limits, 500s and empty bodies keep 3 attempts (`clip_selection.
+classify_gemini_error`). Replayed through the real SDK with the 503 body Gemini
+sent: bursts of 3-6 consecutive 503s used to fail the job and now recover.
+`get_visual_clips` (silent video) and the layout picker make their own
+single-attempt calls and do not use this loop.
 
 ## Development Commands
 

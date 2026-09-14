@@ -414,3 +414,80 @@ def with_clip_instructions(prompt, instructions, stage):
     if at == -1:
         return prompt.rstrip("\n") + "\n" + block
     return prompt[:at] + block + prompt[at:]
+
+
+# --- Gemini retries ---------------------------------------------------------------
+
+# Gemini answers 503 UNAVAILABLE ("This model is currently experiencing high
+# demand") in bursts, and giving up throws away the job's download and
+# transcription. Measured over 10 harness runs on 14-sep-2026: 8 calls hit a
+# 503; 6 went through after one retry (5 s), 1 after two, and 1 was still
+# overloaded ~22 s in, which failed its run on the old budget (3 attempts,
+# 5 s + 10 s of waiting). A default google-genai client never retries
+# (retry_options=None), so main._run_gemini_stage is the only retry there is.
+GEMINI_OVERLOAD_WAIT_SECONDS = 180.0
+
+_BAD_BODY_TOKENS = ("empty response body", "did not contain a JSON object",
+                    "Failed to parse Gemini JSON response")
+# Everything the retry loop has always retried with the short budget.
+_TRANSIENT_TOKENS = ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "500",
+                     "INTERNAL", "overloaded", "Deadline")
+
+
+def classify_gemini_error(error):
+    """How to retry a failed Gemini call: "overload", "transient" or None (don't).
+
+    "overload" is a 503: google-genai errors carry it as ``code``, and messages
+    without one (the Ollama shim's "cannot reach Ollama") start with it. Rate
+    limits, 500s and empty or broken bodies stay "transient", the short budget
+    they always had. Broken bodies are checked first because a JSON decode
+    message can read "column 503".
+    """
+    import re
+
+    msg = str(error)
+    if any(tok in msg for tok in _BAD_BODY_TOKENS):
+        return "transient"
+    code = getattr(error, "code", None)
+    if isinstance(code, int) and not isinstance(code, bool):
+        if code == 503:
+            return "overload"
+    elif re.match(r"\s*503\b", msg):
+        return "overload"
+    if any(tok in msg for tok in _TRANSIENT_TOKENS):
+        return "transient"
+    return None
+
+
+def gemini_retry_delay(kind, failures, waited, overload_budget, jitter=1.0):
+    """Seconds to sleep before the next attempt, or None to give up.
+
+    ``failures`` counts failures of this kind, this one included; ``waited`` is
+    what this call has already slept. A 503 backs off 5, 10, 20, 40, 60, 60... s
+    (times ``jitter``, so jobs hit by the same burst do not retry in step) until
+    ``overload_budget`` seconds of waiting are used. Anything else keeps the
+    3-attempt budget: 5 s, 10 s, give up.
+    """
+    if kind == "overload":
+        remaining = overload_budget - waited
+        if remaining < 1:
+            return None
+        return min(60.0, 5.0 * 2 ** (failures - 1) * jitter, remaining)
+    if failures >= 3:
+        return None
+    return 5.0 * 2 ** (failures - 1)
+
+
+def gemini_overload_budget():
+    """``GEMINI_OVERLOAD_WAIT_SECONDS`` (default 180): how long one call keeps
+    retrying a 503 before the job fails. 0 turns the wait off; capped at 1 h."""
+    import math
+    import os
+
+    try:
+        value = float(os.environ.get("GEMINI_OVERLOAD_WAIT_SECONDS", ""))
+    except ValueError:
+        return GEMINI_OVERLOAD_WAIT_SECONDS
+    if not math.isfinite(value):
+        return GEMINI_OVERLOAD_WAIT_SECONDS
+    return min(max(value, 0.0), 3600.0)

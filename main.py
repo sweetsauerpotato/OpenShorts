@@ -2,6 +2,7 @@ import time
 import cv2
 import subprocess
 import argparse
+import random
 import re
 import shutil
 import sys
@@ -29,7 +30,9 @@ from clip_selection import (build_transcript_windows, clip_count_targets,
                             clip_duration_bounds, snap_clip_to_words,
                             trim_to_best, best_window_scores, build_shortlist,
                             normalize_clip_instructions,
-                            with_clip_instructions, CLIP_INSTRUCTIONS_MAX_CHARS)
+                            with_clip_instructions, CLIP_INSTRUCTIONS_MAX_CHARS,
+                            classify_gemini_error, gemini_retry_delay,
+                            gemini_overload_budget)
 from ffmpeg_utils import (video_encode_args, audio_encode_args, QUALITY,
                           QUALITY_FAST, METADATA_SCRUB)
 from dotenv import load_dotenv
@@ -1563,13 +1566,20 @@ def transcribe_video(video_path):
 
 def _run_gemini_stage(client, model_name, prompt, schema):
     """One schema-enforced Gemini call with transient-error backoff.
-    Returns (parsed_dict, cost_analysis)."""
+    Returns (parsed_dict, cost_analysis).
+
+    What is retried and for how long lives in clip_selection
+    (classify_gemini_error, gemini_retry_delay): a 503 overload keeps retrying
+    for up to GEMINI_OVERLOAD_WAIT_SECONDS of waiting, anything else transient
+    gets 3 attempts."""
     config = genai_types.GenerateContentConfig(
         response_mime_type="application/json",
         response_schema=schema,
     )
-    max_attempts = 3
-    for attempt in range(1, max_attempts + 1):
+    budget = gemini_overload_budget()
+    failures = {"overload": 0, "transient": 0}
+    waited = 0.0
+    while True:
         try:
             response = client.models.generate_content(model=model_name, contents=prompt, config=config)
             # Policy blocks are deterministic — retrying only burns quota and
@@ -1586,21 +1596,35 @@ def _run_gemini_stage(client, model_name, prompt, schema):
             else:
                 parsed = gemini_worker._parse_json_response_text(
                     gemini_worker._get_response_text(response))
+            if failures["overload"]:
+                n = failures["overload"]
+                print(f"✅ Gemini answered after {n} overload retr{'y' if n == 1 else 'ies'} "
+                      f"({waited:.0f}s of waiting).")
             return parsed, gemini_worker._calculate_cost_analysis(response, model_name)
         except gemini_worker.GeminiBlockedError:
             raise  # deterministic policy block — never retry
         except Exception as e:
-            msg = str(e)
-            transient = any(tok in msg for tok in (
-                '503', 'UNAVAILABLE', '429', 'RESOURCE_EXHAUSTED',
-                '500', 'INTERNAL', 'overloaded', 'Deadline',
-                'empty response body', 'did not contain a JSON object',
-                'Failed to parse Gemini JSON response'))
-            if attempt == max_attempts or not transient:
+            kind = classify_gemini_error(e)
+            if kind is None:
                 raise
-            wait = 5 * (2 ** (attempt - 1))
-            print(f"⚠️ Gemini transient error (attempt {attempt}/{max_attempts}), retrying in {wait}s: {msg[:150]}")
+            failures[kind] += 1
+            wait = gemini_retry_delay(kind, failures[kind], waited, budget,
+                                      jitter=random.uniform(0.8, 1.2))
+            if wait is None:
+                if kind == "overload":
+                    raise gemini_worker.GeminiOverloadedError(
+                        f"Gemini is overloaded right now (503 UNAVAILABLE) and still was "
+                        f"after {waited:.0f}s of retries. Nothing is wrong with this video: "
+                        f"run the job again in a few minutes.") from e
+                raise
+            if kind == "overload":
+                print(f"⚠️ Gemini is overloaded (503). Retry {failures['overload']} in "
+                      f"{wait:.0f}s ({waited:.0f}s waited so far, up to {budget:.0f}s).")
+            else:
+                print(f"⚠️ Gemini transient error (attempt {failures['transient']}/3), "
+                      f"retrying in {wait:.0f}s: {str(e)[:150]}")
             time.sleep(wait)
+            waited += wait
 
 
 def _run_stage_split(client, model_name, items, build_prompt, schema, key, costs, label):
@@ -1781,6 +1805,11 @@ def get_viral_clips(transcript_result, video_duration, instructions=None):
         # Content-policy rejection: propagate so the job fails with the real
         # reason instead of a generic "no clips found".
         print(f"🚫 {e}")
+        raise
+    except gemini_worker.GeminiOverloadedError as e:
+        # Same reasoning: the job must say Gemini was overloaded, not that the
+        # video had no usable clips.
+        print(f"❌ {e}")
         raise
     except Exception as e:
         print(f"❌ Gemini Error: {e}")

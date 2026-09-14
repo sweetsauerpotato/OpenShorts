@@ -196,15 +196,11 @@ def test_non_text_contents_is_refused():
 
 # --- error mapping ---------------------------------------------------------
 
-# Mirrors main._run_gemini_stage's transient list. test_transient_tokens_match_main
-# below fails if that list drifts away from this copy.
-TRANSIENT = ('503', 'UNAVAILABLE', '429', 'RESOURCE_EXHAUSTED', '500', 'INTERNAL',
-             'overloaded', 'Deadline', 'empty response body',
-             'did not contain a JSON object', 'Failed to parse Gemini JSON response')
-
-
 def _is_transient(exc):
-    return any(tok in str(exc) for tok in TRANSIENT)
+    """Whether main._run_gemini_stage retries it: the loop's own decision
+    function, not a copy of its token list that could drift."""
+    from clip_selection import classify_gemini_error
+    return classify_gemini_error(exc) is not None
 
 
 def test_connect_error_is_retryable():
@@ -261,13 +257,23 @@ def test_context_overflow_warns(capsys):
     assert "context tokens" in capsys.readouterr().out
 
 
-def test_transient_tokens_match_main():
-    """Guards against main.py's transient list drifting from our error strings."""
-    main = pytest.importorskip("main")
-    import inspect
-    src = inspect.getsource(main._run_gemini_stage)
-    for token in ("503", "UNAVAILABLE", "empty response body"):
-        assert token in src, f"main._run_gemini_stage no longer matches {token!r}"
+def test_unreachable_daemon_waits_like_an_overload_but_a_read_timeout_does_not():
+    """Its message starts with 503, so a daemon restart or cold load gets the
+    long overload wait; a read timeout keeps the short 3-attempt budget."""
+    from clip_selection import classify_gemini_error
+
+    def refuse(request):
+        raise httpx.ConnectError("refused", request=request)
+
+    def stall(request):
+        raise httpx.ReadTimeout("slow", request=request)
+
+    for handler, kind in ((refuse, "overload"), (stall, "transient")):
+        _mount(handler)
+        models = llm_provider.OllamaClient("http://fake:11434").models
+        with pytest.raises(RuntimeError) as e:
+            models.generate_content(model="m", contents="hi", config=_Cfg(ScoreLike))
+        assert classify_gemini_error(e.value) == kind
 
 
 # --- provider resolution ---------------------------------------------------

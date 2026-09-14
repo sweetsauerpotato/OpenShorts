@@ -407,6 +407,14 @@ class GeminiBlockedError(ValueError):
     video's content is the problem, not the service."""
 
 
+class GeminiOverloadedError(RuntimeError):
+    """Gemini kept answering 503 UNAVAILABLE for the whole retry budget.
+
+    The opposite of a block: nothing is wrong with the video and the same job
+    will work later, so the job must say that instead of ending with the
+    generic "Gemini did not return usable clips"."""
+
+
 _BLOCKED_FINISH_REASONS = {"SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST",
                            "SPII", "IMAGE_SAFETY", "RECITATION"}
 
