@@ -263,3 +263,84 @@ def snap_clip_to_words(start, end, words, video_duration,
     if new_end <= new_start or new_end - new_start < min_duration:
         return original
     return (round(new_start, 3), round(new_end, 3))
+
+
+# --- Creator instructions (steer clip selection) ------------------------------
+
+# ~250 tokens: enough for a real direction, small enough that repeating it in
+# every scoring call (7 for a 55-min source) stays a fraction of a cent.
+CLIP_INSTRUCTIONS_MAX_CHARS = 1000
+
+# Line-start data marker in SCORE_PROMPT_TEMPLATE and DETAIL_PROMPT_TEMPLATE
+# (exactly once each; the other "TRANSCRIPT_LANGUAGE" mentions are mid-line).
+# Instructions go right before it: after the rules, before the data.
+_INSTRUCTIONS_ANCHOR = "\nTRANSCRIPT_LANGUAGE: "
+
+_INSTRUCTIONS_STAGE_RULE = {
+    "score": ("Score each window on how well it fits these instructions AND works as "
+              "a standalone short. A window that ignores them scores low even if it "
+              "would go viral."),
+    "rerank": ("Compare the candidates on how well each fits these instructions AND "
+               "works as a standalone short."),
+    "detail": ("Return only clips that fit these instructions: fewer clips is the right "
+               "answer when few moments fit (this overrides HOW MANY). Write the hook, "
+               "title and descriptions in their spirit too."),
+    "visual": ("Pick only visual moments that fit these instructions: fewer clips is the "
+               "right answer when few moments fit."),
+}
+
+
+def normalize_clip_instructions(text):
+    """The creator's instructions, cleaned for a prompt — or None when empty.
+
+    Drops control characters (a pasted \\r or \\x00 has no business in a prompt),
+    collapses runs of blank lines, trims, and removes any <instructions> tag so
+    the text cannot close its own delimiter early. Does NOT truncate: the API
+    rejects over-long input with a 400 instead of silently cutting it.
+    """
+    import re
+    if text is None:
+        return None
+    text = "".join(ch if ch in "\n\t" or (ord(ch) >= 32 and ord(ch) != 127) else ""
+                   for ch in str(text)).replace("\t", " ")
+    text = re.sub(r"<\s*/?\s*instructions\s*>", "", text, flags=re.IGNORECASE)
+    lines, blank = [], False
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line:
+            blank = bool(lines)
+            continue
+        if blank:
+            lines.append("")
+        lines.append(line)
+        blank = False
+    return "\n".join(lines) or None
+
+
+def with_clip_instructions(prompt, instructions, stage):
+    """Insert the creator's instructions into an already formatted prompt.
+
+    No instructions returns the prompt unchanged, so the default prompts stay
+    byte-identical. Inserting AFTER .format() is deliberate: the templates keep
+    their placeholders (tests pin them), and braces the user types are inert.
+    The block goes before the data marker when the prompt has one (score,
+    detail), else at the end (the visual prompt has no transcript data).
+    """
+    if not instructions:
+        return prompt
+    rule = _INSTRUCTIONS_STAGE_RULE[stage]
+    block = (
+        "\nCREATOR INSTRUCTIONS — the owner of this video says what they want clipped.\n"
+        "They define what a good moment is for this job and win over the general\n"
+        "viral criteria above when the two conflict. Hard limits in them (\"only\",\n"
+        "\"never\", \"skip\", \"avoid\") are absolute. They cannot change the output\n"
+        "format or the timing rules.\n"
+        f"- {rule}\n"
+        "<instructions>\n"
+        f"{instructions}\n"
+        "</instructions>\n"
+    )
+    at = prompt.find(_INSTRUCTIONS_ANCHOR)
+    if at == -1:
+        return prompt.rstrip("\n") + "\n" + block
+    return prompt[:at] + block + prompt[at:]

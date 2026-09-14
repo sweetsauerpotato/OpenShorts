@@ -31,6 +31,7 @@ from s3_uploader import upload_job_artifacts, list_all_clips, upload_actor_to_s3
 import recut
 import layout_ranges
 import llm_provider
+from clip_selection import normalize_clip_instructions, CLIP_INSTRUCTIONS_MAX_CHARS
 
 load_dotenv()
 
@@ -2140,6 +2141,7 @@ async def process_endpoint(
     captions: Optional[str] = Form(None),
     upload_id: Optional[str] = Form(None),
     quality: Optional[str] = Form(None),
+    clip_instructions: Optional[str] = Form(None),
 ):
     api_key = await resolve_gemini(request)
     if not api_key and not await llm_available_without_key():
@@ -2168,6 +2170,7 @@ async def process_endpoint(
         captions = body.get("captions")
         upload_id = body.get("upload_id")
         quality = body.get("quality")
+        clip_instructions = body.get("clip_instructions")
 
     # Normalize output format (auto = keep pipeline default).
     if output_format not in ("vertical", "horizontal", "square"):
@@ -2187,6 +2190,17 @@ async def process_endpoint(
         if download_quality not in DOWNLOAD_QUALITIES:
             raise HTTPException(status_code=400, detail=(
                 "quality must be one of " + ", ".join(f"{q}p" for q in DOWNLOAD_QUALITIES)))
+
+    # Creator instructions steer every clip-selection stage. Rejected when too
+    # long rather than cut, so a caller never gets clips chosen from half of
+    # what they wrote. Blank or whitespace-only means "none".
+    if clip_instructions is not None and not isinstance(clip_instructions, str):
+        raise HTTPException(status_code=400, detail="clip_instructions must be text")
+    instructions = normalize_clip_instructions(clip_instructions)
+    if instructions and len(instructions) > CLIP_INSTRUCTIONS_MAX_CHARS:
+        raise HTTPException(status_code=400, detail=(
+            f"clip_instructions must be at most {CLIP_INSTRUCTIONS_MAX_CHARS} characters "
+            f"(got {len(instructions)})"))
 
     # Accepts a JSON list or a comma-separated form field.
     if isinstance(layouts, str):
@@ -2431,6 +2445,16 @@ async def process_endpoint(
     cmd.extend(["-o", job_output_dir])
     if output_format and output_format != "auto":
         cmd.extend(["--format", output_format])
+    # A file in the job dir, passed on the command line: the resume manifest
+    # persists `cmd` but rebuilds the env from scratch, so an env var would be
+    # silently dropped if the job resumed after a restart. One place for every
+    # ingest path (link, upload, agent upload, Thumbnail Studio handover).
+    if instructions:
+        instructions_path = os.path.join(job_output_dir, "clip_instructions.txt")
+        with open(instructions_path, "w", encoding="utf-8") as fh:
+            fh.write(instructions)
+        cmd.extend(["--instructions-file", instructions_path])
+        print(f"[instructions] job={job_id} chars={len(instructions)}")
 
     print(f"[attestation] job={job_id} ip={attestation['ip']} source={attestation['source']} ack=true")
 

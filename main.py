@@ -27,7 +27,8 @@ import layout_picker
 import llm_provider
 from clip_selection import (build_transcript_windows, clip_count_targets,
                             clip_duration_bounds, snap_clip_to_words,
-                            trim_to_best)
+                            trim_to_best, normalize_clip_instructions,
+                            with_clip_instructions, CLIP_INSTRUCTIONS_MAX_CHARS)
 from ffmpeg_utils import (video_encode_args, audio_encode_args, QUALITY,
                           QUALITY_FAST, METADATA_SCRUB)
 from dotenv import load_dotenv
@@ -1629,13 +1630,17 @@ def _run_stage_split(client, model_name, items, build_prompt, schema, key, costs
                 + _run_stage_split(client, model_name, items[mid:], build_prompt, schema, key, costs, label))
 
 
-def get_viral_clips(transcript_result, video_duration):
+def get_viral_clips(transcript_result, video_duration, instructions=None):
     """Two-pass clip selection: score transcript windows, then detail the best.
 
     Windowing gives even coverage on long videos (a single call over the whole
     transcript clusters picks near the start), and the cheap scoring pass keeps
     the expensive detail reasoning focused on the shortlist. Cuts are snapped to
     word boundaries so clips don't start/end mid-word.
+
+    ``instructions``: the creator's direction (normalized text or None). It goes
+    into BOTH passes: scoring is where most of the video is eliminated, so
+    steering only the detail pass would come too late.
     """
     print("\U0001f916  Analyzing transcript (2-pass: score → detail)...")
     # Provider choice lives in llm_provider: local Ollama by default, Gemini
@@ -1671,9 +1676,10 @@ def get_viral_clips(transcript_result, video_duration):
             return [{"id": w["id"], "start": w["start"], "end": w["end"], "text": w["text"]} for w in ws]
 
         def _score_prompt(ws):
-            return gemini_worker.SCORE_PROMPT_TEMPLATE.format(
+            return with_clip_instructions(gemini_worker.SCORE_PROMPT_TEMPLATE.format(
                 video_duration=video_duration, language=language,
-                windows_json=json.dumps(_payload(ws), ensure_ascii=False))
+                windows_json=json.dumps(_payload(ws), ensure_ascii=False)),
+                instructions, "score")
 
         for b in range(0, len(windows), SCORE_BATCH):
             scored.extend(_run_stage_split(
@@ -1725,11 +1731,12 @@ def get_viral_clips(transcript_result, video_duration):
         def _detail_prompt(ws):
             # A split batch keeps the full clip-count band: a short list can
             # still hold the best clips, and the model returns fewer anyway.
-            return gemini_worker.DETAIL_PROMPT_TEMPLATE.format(
+            return with_clip_instructions(gemini_worker.DETAIL_PROMPT_TEMPLATE.format(
                 video_duration=video_duration, language=language,
                 min_clips=min_clips, max_clips=max_clips,
                 min_secs=min_secs, max_secs=max_secs,
-                windows_json=json.dumps(_detail_payload(ws), ensure_ascii=False))
+                windows_json=json.dumps(_detail_payload(ws), ensure_ascii=False)),
+                instructions, "detail")
 
         shorts = _run_stage_split(client, model_name, shortlist, _detail_prompt,
                                   gemini_worker.DetailResponse, "shorts", costs, "detail")
@@ -1794,10 +1801,11 @@ def speech_is_sparse(transcript, duration):
     return words < MIN_SPEECH_WORDS or words / minutes < MIN_SPEECH_WORDS_PER_MIN
 
 
-def get_visual_clips(video_path, video_duration, language="en"):
+def get_visual_clips(video_path, video_duration, language="en", instructions=None):
     """Clip a SILENT video by vision: Gemini watches the footage and picks the
     most engaging visual moments (no transcript). Returns the same
-    {"shorts", "cost_analysis"} shape as get_viral_clips, or None."""
+    {"shorts", "cost_analysis"} shape as get_viral_clips, or None.
+    ``instructions`` steers the pick exactly as in get_viral_clips."""
     print("🎥  Silent video — analyzing with Gemini vision (no transcript)...")
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -1834,10 +1842,10 @@ def get_visual_clips(video_path, video_duration, language="en"):
         v_min_clips = _env_int("CLIP_TARGET_MIN", 3)
         v_max_clips = max(v_min_clips, _env_int("CLIP_TARGET_MAX", 15))
         v_min_secs, v_max_secs = clip_duration_bounds()
-        prompt = gemini_worker.VISUAL_PROMPT_TEMPLATE.format(
+        prompt = with_clip_instructions(gemini_worker.VISUAL_PROMPT_TEMPLATE.format(
             video_duration=video_duration, language=language,
             min_clips=v_min_clips, max_clips=v_max_clips,
-            min_secs=v_min_secs, max_secs=v_max_secs)
+            min_secs=v_min_secs, max_secs=v_max_secs), instructions, "visual")
         config = genai_types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=gemini_worker.VisualResponse,
@@ -1897,9 +1905,25 @@ if __name__ == '__main__':
                              "360p-only fallback is disabled; the job stops instead.")
     parser.add_argument('--transcript', type=str,
                         help="Path to a precomputed transcript JSON (transcribe_media shape); skips transcription.")
+    parser.add_argument('--instructions-file', type=str,
+                        help="UTF-8 text file with the creator's clip instructions; steers "
+                             "every selection stage.")
 
     args = parser.parse_args()
     output_format = args.format
+
+    # Read the instructions BEFORE any download or transcription: the caller
+    # asked for them explicitly, so an unreadable file fails the job in seconds
+    # rather than quietly selecting clips without them after 20 minutes of work.
+    clip_instructions = None
+    if args.instructions_file:
+        with open(args.instructions_file, encoding="utf-8") as fh:
+            clip_instructions = normalize_clip_instructions(fh.read())
+        if clip_instructions:
+            # Defense in depth: the API already rejects longer input.
+            clip_instructions = clip_instructions[:CLIP_INSTRUCTIONS_MAX_CHARS]
+            preview = clip_instructions.replace("\n", " ")
+            print(f"🎯 Clip instructions: {preview[:200]}{'…' if len(preview) > 200 else ''}")
 
     script_start_time = time.time()
     
@@ -2029,9 +2053,9 @@ if __name__ == '__main__':
 
         # 4. Gemini Analysis (transcript-driven, or vision for silent videos)
         if transcript is not None:
-            clips_data = get_viral_clips(transcript, duration)
+            clips_data = get_viral_clips(transcript, duration, instructions=clip_instructions)
         else:
-            clips_data = get_visual_clips(input_video, duration)
+            clips_data = get_visual_clips(input_video, duration, instructions=clip_instructions)
 
         if not clips_data or 'shorts' not in clips_data:
             # Deliberately fail instead of reframing the whole video: that path

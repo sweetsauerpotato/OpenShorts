@@ -147,6 +147,15 @@ TOOLS = [
                     "type": "number", "minimum": 10, "maximum": 180,
                     "description": "Maximum clip length in seconds (default 60). Must be ≥ 5s above the minimum.",
                 },
+                "clip_instructions": {
+                    "type": "string", "maxLength": 1000,
+                    "description": "Optional direction for choosing clips, in plain words: what to "
+                                   "look for and what to skip (e.g. 'only moments where the guest "
+                                   "gives a concrete tip; skip the sponsor read'). Steers every "
+                                   "selection stage; 'only'/'never' are treated as hard limits, and "
+                                   "fewer clips come back when few moments fit. Cannot change clip "
+                                   "length rules.",
+                },
                 "quality": {
                     "type": "integer", "enum": [360, 480, 720, 1080, 1440, 2160],
                     "description": "source_url only: download up to this resolution (pixels tall). "
@@ -363,7 +372,8 @@ async def _tool_process_video(client, args):
         "webhook_url": args.get("webhook_url"),
         "webhook_secret": args.get("webhook_secret"),
     }
-    for k in ("target_clips", "clip_min_seconds", "clip_max_seconds", "captions", "quality"):
+    for k in ("target_clips", "clip_min_seconds", "clip_max_seconds", "captions", "quality",
+              "clip_instructions"):
         if args.get(k) is not None:
             body[k] = args[k]
     # Same default as the dashboard: hook on unless the caller opts out. The
