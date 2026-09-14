@@ -28,9 +28,11 @@ Metrics, cheapest signal first:
 import argparse
 import json
 import os
+import re
 import statistics
 import sys
 import time
+from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -61,6 +63,12 @@ class _RecordingModels:
         record = {"stage": stage, "ok": False, "parsed_ok": False,
                   "error": None, "seconds": 0.0,
                   "prompt_tokens": 0, "output_tokens": 0, "payload": None}
+        # Which windows this call was SHOWN, read from the prompt itself. For the
+        # detail stage that is the real shortlist, however main.py built it —
+        # so the ranking metrics stay true when the shortlisting logic changes.
+        contents = kwargs.get("contents")
+        record["window_ids"] = (re.findall(r'"id": "(window_\d+)"', contents)
+                                if isinstance(contents, str) else [])
         try:
             resp = self._inner.generate_content(**kwargs)
         except Exception as e:
@@ -179,7 +187,23 @@ def source_duration(video_path):
 # one run
 # --------------------------------------------------------------------------
 
-def run_once(provider, transcript, duration, seed=None):
+def clip_text(clip, transcript):
+    """Transcript text spoken inside a clip's [start, end]."""
+    s, e = float(clip.get("start", 0)), float(clip.get("end", 0))
+    return " ".join(seg.get("text", "") for seg in transcript.get("segments", [])
+                    if seg.get("end", 0) > s and seg.get("start", 0) < e)
+
+
+def topic_hits(clips, transcript, keywords):
+    """(on-topic clips, total): a clip is on topic when its own transcript text
+    contains any keyword (case-insensitive substring, so 'crusad' matches
+    crusade/crusader/crusades). An objective check that instructions steer."""
+    kws = [k.strip().lower() for k in keywords or [] if k.strip()]
+    hits = [any(k in clip_text(c, transcript).lower() for k in kws) for c in clips]
+    return sum(hits), len(hits)
+
+
+def run_once(provider, transcript, duration, seed=None, instructions=None, keywords=None):
     import main
     import llm_provider
     from clip_selection import build_transcript_windows, clip_duration_bounds
@@ -201,7 +225,7 @@ def run_once(provider, transcript, duration, seed=None):
     try:
         t0 = time.time()
         try:
-            result = main.get_viral_clips(transcript, duration)
+            result = main.get_viral_clips(transcript, duration, instructions=instructions)
             error = None
         except Exception as e:
             result, error = None, f"{type(e).__name__}: {e}"
@@ -246,6 +270,23 @@ def run_once(provider, transcript, duration, seed=None):
         if w and abs(start - w["start"]) < 1.0 and abs(end - w["end"]) < 1.0:
             echoed.append(c.get("source_window_id"))
 
+    # --- ranking quality: coverage, resolution, ties in the real shortlist ---
+    best_score = {}
+    for w in scored:
+        wid = w.get("id")
+        if wid in valid_ids:
+            best_score[wid] = max(best_score.get(wid, -1), w.get("score", 0))
+    shortlist_ids = []
+    for rec in calls:
+        if rec["stage"] == "detail":
+            for wid in rec.get("window_ids") or []:
+                if wid not in shortlist_ids:
+                    shortlist_ids.append(wid)
+    shortlist_scores = [best_score.get(wid) for wid in shortlist_ids]
+    tie_counts = Counter(s for s in shortlist_scores if s is not None)
+    shortlist_in_ties = sum(n for n in tie_counts.values() if n > 1)
+    shortlist_tied_pairs = sum(n * (n - 1) // 2 for n in tie_counts.values())
+
     final = (result or {}).get("shorts", [])
     playbook_hooks = [c.get("viral_hook_text") for c in final
                       if _copies_playbook(c.get("viral_hook_text") or "")]
@@ -256,14 +297,18 @@ def run_once(provider, transcript, duration, seed=None):
     return {
         "provider": provider,
         "seed": seed,
+        "instructions": instructions,
+        "topic_hits": topic_hits(final, transcript, keywords) if keywords else None,
         "error": error,
         "wall_seconds": round(wall, 1),
         "n_windows": len(windows),
         "calls": len(calls),
         "failed_calls": sum(1 for r in calls if not r["ok"]),
+        # Over calls that RETURNED: a 503 retry says nothing about the schema,
+        # and counting it (14-sep-2026, Gemini under load) read as 0.615.
         "schema_compliance": (
-            round(sum(1 for r in calls if r["parsed_ok"]) / len(calls), 3)
-            if calls else None),
+            round(sum(1 for r in calls if r["parsed_ok"]) / sum(1 for r in calls if r["ok"]), 3)
+            if any(r["ok"] for r in calls) else None),
         "prompt_tokens": sum(r["prompt_tokens"] for r in calls),
         "output_tokens": sum(r["output_tokens"] for r in calls),
         "scored": scored,
@@ -273,6 +318,12 @@ def run_once(provider, transcript, duration, seed=None):
         "band_bounds": [min_secs, max_secs],
         "out_of_window": out_of_window,
         "echoed": echoed,
+        "windows_scored": len(best_score),
+        "distinct_scores": len(set(best_score.values())),
+        "shortlist_ids": shortlist_ids,
+        "shortlist_scores": shortlist_scores,
+        "shortlist_in_ties": shortlist_in_ties,
+        "shortlist_tied_pairs": shortlist_tied_pairs,
         "playbook_hooks": playbook_hooks,
         "foreign_script": foreign,
         "final_clips": final,
@@ -400,6 +451,18 @@ def report(run):
           f"{run['echoed'][:6]}   <- returns the window instead of choosing")
     print(f"    playbook hooks    : {len(run['playbook_hooks'])} {run['playbook_hooks'][:4]}")
     print(f"    foreign script    : {len(run['foreign_script'])} {run['foreign_script'][:3]}")
+    print(f"  RANKING")
+    print(f"    windows scored    : {run['windows_scored']}/{run['n_windows']}"
+          f"   <- unscored windows can never be picked")
+    print(f"    distinct scores   : {run['distinct_scores']}")
+    print(f"    shortlist (detail): {len(run['shortlist_ids'])} windows, pass-1 scores "
+          f"{run['shortlist_scores']}")
+    print(f"    shortlist ties    : {run['shortlist_in_ties']} windows in ties, "
+          f"{run['shortlist_tied_pairs']} tied pairs   <- ties are broken by transcript order")
+    if run.get("topic_hits"):
+        on, total = run["topic_hits"]
+        print(f"  INSTRUCTIONS : {run['instructions']!r}")
+        print(f"    on-topic clips    : {on}/{total}   <- transcript inside the clip mentions a keyword")
     print(f"    final clips       : {len(run['final_clips'])} (after word-snapping)")
     for c in run["final_clips"]:
         d = c.get("end", 0) - c.get("start", 0)
@@ -420,7 +483,13 @@ def main_cli():
     ap.add_argument("--runs", type=int, default=1,
                     help="repeat each provider N times to measure self-agreement")
     ap.add_argument("--out", help="write the full record to this JSON file")
+    ap.add_argument("--instructions", help="creator clip instructions to steer selection")
+    ap.add_argument("--topic-keywords",
+                    help="comma separated; reports how many final clips mention one")
     args = ap.parse_args()
+    from clip_selection import normalize_clip_instructions
+    instructions = normalize_clip_instructions(args.instructions)
+    keywords = [k for k in (args.topic_keywords or "").split(",") if k.strip()]
 
     print("=" * 74)
     print("CLIP SELECTION COMPARISON")
@@ -448,7 +517,8 @@ def main_cli():
         for i in range(args.runs):
             seed = (1000 + i) if (provider == "ollama" and args.runs > 1) else None
             print(f"\n>>> running {provider} ({i + 1}/{args.runs})...")
-            run = run_once(provider, transcript, duration, seed=seed)
+            run = run_once(provider, transcript, duration, seed=seed,
+                           instructions=instructions, keywords=keywords)
             runs.append(run)
             report(run)
 
@@ -479,9 +549,21 @@ def main_cli():
     # other, that is a temperature/context bug, not a capability limit.
     for provider, group in by_provider.items():
         if len(group) > 1:
-            overlap, ta, tb = rank_overlap(group[0], group[1])
-            print(f"\n  SELF-AGREEMENT {provider} (run1 vs run2) top-5 overlap: {overlap}")
-            print(f"    {ta}\n    {tb}")
+            a, b = group[0], group[1]
+            overlap, ta, tb = rank_overlap(a, b)
+            print(f"\n  SELF-AGREEMENT {provider} (run1 vs run2)")
+            print(f"    pass-1 top-5 overlap : {overlap}")
+            print(f"      {ta}\n      {tb}")
+            sa, sb = set(a["shortlist_ids"]), set(b["shortlist_ids"])
+            if sa and sb:
+                print(f"    shortlist overlap    : {len(sa & sb)}/{max(len(sa), len(sb))} "
+                      f"windows sent to the detail pass in both runs")
+            pairs = [max((iou((ca["start"], ca["end"]), (cb["start"], cb["end"]))
+                          for cb in b["final_clips"]), default=0.0)
+                     for ca in a["final_clips"]]
+            if pairs:
+                print(f"    final clips          : {sum(1 for p in pairs if p >= 0.5)}/{len(pairs)} "
+                      f"of run1's clips reappear in run2 (IoU >= 0.5)")
 
     if args.out:
         with open(args.out, "w", encoding="utf-8") as fh:
