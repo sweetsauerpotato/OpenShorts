@@ -50,6 +50,71 @@ silent/sparse-speech clip selection (`get_visual_clips` uploads the whole
 video), `/api/edit` and `/api/effects/generate`, thumbnail image generation,
 SaaSShorts research (Google Search grounding).
 
+### How clips are chosen: scoring and creator instructions
+
+`get_viral_clips` works on ~90 s transcript windows overlapping by 30 s. **Pass
+1** scores every window in batches of 8 (`SCORE_PROMPT_TEMPLATE`);
+`clip_selection.build_shortlist` keeps the best `max(3, min(10, duration // 90
++ 2))`. **Pass 2** (`DETAIL_PROMPT_TEMPLATE`) reads per-sentence timestamps to
+place the cut inside each shortlisted window and writes the hook, title and
+descriptions. Both passes use `GEMINI_MODEL`; there is no per-pass setting.
+
+**Every window gets a score** (14-sep-2026). The prompt used to ask for "up to 3
+windows" per batch, so on a 55-min documentary only 19-20 of 51 windows were
+ever scored. It now scores all of them on an anchored scale (90-100 hook AND
+payoff, 70-89 one of the two, 40-69 needs context, 0-39 filler). Measured with
+the harness, 2 runs each; it fixed less than the coverage number suggests:
+- coverage 19-20 -> 51 of 51; distinct scores 6-8 -> 21-22
+- ties were NOT fixed: flash-lite answers on a grid (72, 75, 78, 80, 82, 85,
+  88), tied pairs in the top 10 went 10-14 -> 7-9, and ties at the shortlist
+  cut (the only ones that change what reaches pass 2) left out 1-2 windows
+  both before and after
+- no final clip on that video came from a window the old prompt had not
+  scored. The cap bites when strong moments are adjacent, because adjacent
+  windows share a batch: with a topic instruction 3 of the top 4 sat in one.
+- on short sources pass 1 stops filtering: a 10-min slice sends 8 of 9 windows
+  to pass 2 (was 4) and gets 6 clips (was 4); the 2 extra score lowest in pass 2
+- 1.17 -> 1.51 cents per 55-min video on flash-lite (pass-1 output ~3.8k tokens)
+
+`build_shortlist` keeps the best score of a repeated id, ignores ids that are
+not windows (the old inline sort cut the top N first, so a made-up id took a
+slot) and breaks ties by position in the video, never by answer order.
+
+**Creator instructions** (`clip_instructions` on `/api/process`, the dashboard's
+"what to clip" box, MCP `process_video`) are free text of at most 1000
+characters after `normalize_clip_instructions`; longer input is a 400, never a
+silent cut. app.py writes `<job>/clip_instructions.txt` and passes
+`--instructions-file`, so they survive a resume (the manifest keeps `cmd`, not
+the job's env). `with_clip_instructions` inserts a delimited block after
+`.format()` into pass 1, pass 2 and `get_visual_clips`: blank instructions keep
+every prompt byte-identical and braces the user types stay inert. Pass 1 must
+get them, since that is where most windows are eliminated. Measured with "Only
+moments about the Crusades and the Knights Templar." (9 of 51 windows mention
+either): on-topic clips 1 of 6 without, 3/3 in both runs with, the same clips
+both times. The block costs +128 input tokens per call for that 56-character
+text, but fewer clips means less pass-2 output (6x the input price on
+flash-lite), so the job got cheaper: 1.51 -> 1.46 cents. The box is cleared for
+each video on purpose.
+
+**The randomness left is in pass 2, not the ranking.** On the 10-min slice both
+runs sent the identical 8 windows to pass 2 and only 3 of 6 final clips
+matched; `_run_gemini_stage` sets no temperature or thinking level (API
+defaults). A side-by-side rerank of the top candidates would end the ties, but
+ties at the cut moved only 1-2 windows — measure pass-2 variance before building
+one. `GEMINI_THINKING_SCORE` looks like a control for this and is not: only the
+standalone `gemini_worker.py` CLI reads it. Flash models (3.6-3.8) think at
+"medium" by default, billed as output.
+
+**Measuring it:** `tools/compare_selection.py` runs the real `get_viral_clips`
+on a cached transcript and records the raw answers: schema compliance, window
+echo, band violations, copied playbook hooks, windows scored, score bands,
+shortlist ties and overlap, tokens per stage, run-to-run agreement, and
+on-topic clips with `--instructions` / `--topic-keywords`. Keep sources in
+`.cache/harness/`, never `uploads/` (deleted after 6 h, transcript cache
+included). A 55-min run costs ~1.5 cents. Gemini 503s ("high demand") hit 6 of
+10 runs on 14-sep-2026 and failed one, because `_run_gemini_stage` gives up
+after ~15 s of backoff; a real job fails the same way.
+
 ## Development Commands
 
 ### Local Development (Docker)
@@ -93,6 +158,8 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 | File | Purpose |
 |------|---------|
 | `main.py` | Core video processing: transcription, scene detection, clip extraction, vertical reframing |
+| `clip_selection.py` | Stdlib-only clip-selection helpers: windows, shortlist, creator instructions, model prices |
+| `tools/compare_selection.py` | Harness that measures clip selection on a cached transcript (see "How clips are chosen") |
 | `app.py` | FastAPI server with async job queue and REST endpoints |
 | `editor.py` | Gemini AI integration for dynamic video effects (FFmpeg filter generation) |
 | `hooks.py` | Hook text overlay generation with font rendering |
