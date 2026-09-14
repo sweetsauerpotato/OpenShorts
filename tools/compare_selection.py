@@ -194,6 +194,37 @@ def clip_text(clip, transcript):
                     if seg.get("end", 0) > s and seg.get("start", 0) < e)
 
 
+def shortlist_spread(ids, by_id):
+    """(overlapping pairs, seconds sent, unique seconds) for a shortlist.
+
+    Windows overlap by ~30 s, so two adjacent windows repeat each other's
+    transcript. A ranking that clusters its picks spends detail slots on the
+    same moment twice; this makes that visible."""
+    spans = sorted((by_id[i]["start"], by_id[i]["end"]) for i in ids if i in by_id)
+    pairs = sum(1 for a in range(len(spans)) for b in range(a + 1, len(spans))
+                if spans[b][0] < spans[a][1])
+    sent = sum(e - s for s, e in spans)
+    unique, cur = 0.0, None
+    for s, e in spans:
+        if cur and s < cur[1]:
+            cur[1] = max(cur[1], e)
+            continue
+        if cur:
+            unique += cur[1] - cur[0]
+        cur = [s, e]
+    if cur:
+        unique += cur[1] - cur[0]
+    return pairs, round(sent), round(unique)
+
+
+def score_bands(scores):
+    """Counts per band of the scoring prompt's scale: 0-39, 40-69, 70-89, 90-100."""
+    bands = [0, 0, 0, 0]
+    for s in scores:
+        bands[0 if s < 40 else 1 if s < 70 else 2 if s < 90 else 3] += 1
+    return bands
+
+
 def topic_hits(clips, transcript, keywords):
     """(on-topic clips, total): a clip is on topic when its own transcript text
     contains any keyword (case-insensitive substring, so 'crusad' matches
@@ -286,6 +317,13 @@ def run_once(provider, transcript, duration, seed=None, instructions=None, keywo
     tie_counts = Counter(s for s in shortlist_scores if s is not None)
     shortlist_in_ties = sum(n for n in tie_counts.values() if n > 1)
     shortlist_tied_pairs = sum(n * (n - 1) // 2 for n in tie_counts.values())
+    overlap_pairs, sent_seconds, unique_seconds = shortlist_spread(shortlist_ids, by_id)
+
+    stage_tokens = {}
+    for r in calls:
+        tokens = stage_tokens.setdefault(r["stage"], [0, 0])
+        tokens[0] += r["prompt_tokens"]
+        tokens[1] += r["output_tokens"]
 
     final = (result or {}).get("shorts", [])
     playbook_hooks = [c.get("viral_hook_text") for c in final
@@ -324,6 +362,11 @@ def run_once(provider, transcript, duration, seed=None, instructions=None, keywo
         "shortlist_scores": shortlist_scores,
         "shortlist_in_ties": shortlist_in_ties,
         "shortlist_tied_pairs": shortlist_tied_pairs,
+        "shortlist_overlap_pairs": overlap_pairs,
+        "shortlist_sent_seconds": sent_seconds,
+        "shortlist_unique_seconds": unique_seconds,
+        "score_bands": score_bands(best_score.values()),
+        "stage_tokens": stage_tokens,
         "playbook_hooks": playbook_hooks,
         "foreign_script": foreign,
         "final_clips": final,
@@ -439,6 +482,9 @@ def report(run):
     if run["call_seconds"]:
         print(f"  per-call seconds: {run['call_seconds']} "
               f"(median {statistics.median(run['call_seconds'])})")
+    if run.get("stage_tokens"):
+        print("  tokens in/out by stage: " + ", ".join(
+            f"{stage} {t[0]}/{t[1]}" for stage, t in run["stage_tokens"].items()))
     print(f"  TIER 1")
     print(f"    schema compliance : {run['schema_compliance']}   (1.0 required)")
     print(f"    failed calls      : {run['failed_calls']}")
@@ -455,10 +501,13 @@ def report(run):
     print(f"    windows scored    : {run['windows_scored']}/{run['n_windows']}"
           f"   <- unscored windows can never be picked")
     print(f"    distinct scores   : {run['distinct_scores']}")
+    print(f"    score bands       : {run['score_bands']}   <- windows scored 0-39 / 40-69 / 70-89 / 90-100")
     print(f"    shortlist (detail): {len(run['shortlist_ids'])} windows, pass-1 scores "
           f"{run['shortlist_scores']}")
     print(f"    shortlist ties    : {run['shortlist_in_ties']} windows in ties, "
           f"{run['shortlist_tied_pairs']} tied pairs   <- ties are broken by transcript order")
+    print(f"    shortlist spread  : {run['shortlist_overlap_pairs']} overlapping pairs, "
+          f"{run['shortlist_unique_seconds']}s unique of {run['shortlist_sent_seconds']}s sent")
     if run.get("topic_hits"):
         on, total = run["topic_hits"]
         print(f"  INSTRUCTIONS : {run['instructions']!r}")
