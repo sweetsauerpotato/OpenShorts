@@ -147,6 +147,13 @@ TOOLS = [
                     "type": "number", "minimum": 10, "maximum": 180,
                     "description": "Maximum clip length in seconds (default 60). Must be ≥ 5s above the minimum.",
                 },
+                "quality": {
+                    "type": "integer", "enum": [360, 480, 720, 1080, 1440, 2160],
+                    "description": "source_url only: download up to this resolution (pixels tall). "
+                                   "Default 1080. A video that tops out lower gets its best. Above 360 "
+                                   "the job stops rather than fall back to YouTube's 360p copy. "
+                                   "1440/2160 are much larger downloads.",
+                },
             },
             "required": ["confirm_rights"],
         },
@@ -356,7 +363,7 @@ async def _tool_process_video(client, args):
         "webhook_url": args.get("webhook_url"),
         "webhook_secret": args.get("webhook_secret"),
     }
-    for k in ("target_clips", "clip_min_seconds", "clip_max_seconds", "captions"):
+    for k in ("target_clips", "clip_min_seconds", "clip_max_seconds", "captions", "quality"):
         if args.get(k) is not None:
             body[k] = args[k]
     # Same default as the dashboard: hook on unless the caller opts out. The

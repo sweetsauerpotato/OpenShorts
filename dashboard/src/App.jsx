@@ -816,6 +816,8 @@ function App() {
           acknowledged: !!data.acknowledged,
           output_format: data.outputFormat || 'auto',
           force_low_quality: forceLowQuality,
+          // Download quality (links only). Absent = the server's 1080p default.
+          ...(data.quality ? { quality: Number(data.quality) } : {}),
           ...Object.fromEntries(Object.entries(advanced).filter(([, v]) => v != null)),
         });
       } else if (data.type === 'thumbnail_session') {

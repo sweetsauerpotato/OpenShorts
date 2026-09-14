@@ -3,6 +3,7 @@ import cv2
 import subprocess
 import argparse
 import re
+import shutil
 import sys
 import threading
 import unicodedata
@@ -684,7 +685,8 @@ def is_youtube_url(url):
     return host.endswith(("youtube.com", "youtu.be", "youtube-nocookie.com", "googlevideo.com"))
 
 
-def plan_download_attempts(direct_first, statics, paid, have_hd, youtube=True):
+def plan_download_attempts(direct_first, statics, paid, have_hd, youtube=True,
+                           allow_fallback=True):
     """Ordered (label, capped, proxy) download plan — pure, unit-tested.
 
     ``youtube=False`` (a direct file URL): the server's own IP first, then one
@@ -694,7 +696,13 @@ def plan_download_attempts(direct_first, statics, paid, have_hd, youtube=True):
     ISP proxies (uncapped 1080p, free bytes), then the per-GB paid proxy
     (720p cost cap), and last the conservative fallback strategy through the
     paid proxy (or a static/direct when no paid proxy is configured).
-    ``capped`` marks attempts whose bytes are billed per GB."""
+    ``capped`` marks attempts whose bytes are billed per GB.
+
+    ``allow_fallback=False`` drops that last attempt. Its clients are only ever
+    offered YouTube's combined 360p file (measured 14-sep-2026 on two videos
+    whose HD attempts selected 1080p), so when the caller asked for more than
+    360p it can only deliver the thing they asked not to get. It is kept when
+    no HD strategy exists at all, since it is then the only way to download."""
     if not youtube:
         plan = [('direct', False, None)]
         if statics:
@@ -707,15 +715,72 @@ def plan_download_attempts(direct_first, statics, paid, have_hd, youtube=True):
         for i, s in enumerate(statics):
             plan.append((f'HD-static{i + 1}', False, s))
         plan.append(('HD', bool(paid), paid))
-    plan.append(('fallback', bool(paid),
-                 paid if paid else (statics[0] if statics else None)))
+    if allow_fallback or not plan:
+        plan.append(('fallback', bool(paid),
+                     paid if paid else (statics[0] if statics else None)))
     return plan
 
 
-def download_youtube_video(url, output_dir="."):
+# Download qualities a caller may pick, as "up to N pixels tall". A video that
+# tops out lower simply gets its best. app.DOWNLOAD_QUALITIES mirrors this
+# tuple (tests/test_download_quality.py fails if they drift apart).
+DOWNLOAD_QUALITIES = (360, 480, 720, 1080, 1440, 2160)
+DEFAULT_DOWNLOAD_QUALITY = 1080
+
+
+def download_format(max_height=DEFAULT_DOWNLOAD_QUALITY, capped=False):
+    """yt-dlp format selector for the HD attempts — pure, unit-tested.
+
+    Up to 1080p this is the long-standing H.264 selector, byte-identical for
+    the old 1080p (uncapped) and 720p (per-GB proxy) cases. YouTube serves
+    H.264 only up to 1080p; 1440p and 4K exist only as VP9/AV1, so taller picks
+    ask for VP9 first — restricted to height > 1080 so a video whose VP9 tops
+    out at 1080p still gets the faster-to-decode H.264 stream — and fall back to
+    the H.264 chain. AV1 is never requested: the renderer's OpenCV build is not
+    guaranteed to decode it.
+    """
+    h = min(max_height, 720) if capped else max_height
+    avc = (f'bestvideo[vcodec^=avc1][height<={h}][ext=mp4]+bestaudio[ext=m4a]/'
+           f'bestvideo[vcodec^=avc1][height<={h}]+bestaudio/')
+    tail = (f'best[height<={h}][ext=mp4]/best[height<={h}]/best' if capped
+            else f'best[height<={h}][ext=mp4]/best[ext=mp4]/best')
+    if h <= 1080:
+        return avc + tail
+    vp9 = (f'bestvideo[vcodec^=vp09][height>1080][height<={h}]+bestaudio[ext=m4a]/'
+           f'bestvideo[vcodec^=vp09][height>1080][height<={h}]+bestaudio/')
+    return vp9 + avc + tail
+
+
+def estimate_download_bytes(formats, duration):
+    """Bytes the selected streams will take — pure, unit-tested.
+
+    YouTube omits ``filesize`` on many DASH/HLS streams (both test videos on
+    14-sep-2026 reported none), so fall back to the average bitrate (tbr, kbit/s)
+    times duration: yt-dlp's own estimate. 0 when neither is known."""
+    total = 0
+    for f in formats or []:
+        size = f.get('filesize') or f.get('filesize_approx')
+        if not size:
+            size = (f.get('tbr') or 0) * (duration or 0) * 125  # kbit/s -> B/s
+        total += int(size)
+    return total
+
+
+class DownloadSpaceError(RuntimeError):
+    """Not enough free disk for the selected quality. Deterministic: every
+    attempt would hit the same disk, so the attempt loop stops immediately."""
+
+
+def download_youtube_video(url, output_dir=".", max_height=DEFAULT_DOWNLOAD_QUALITY,
+                           allow_low_fallback=True):
     """
     Downloads a YouTube video using yt-dlp.
     Returns the path to the downloaded video and the video title.
+
+    ``max_height``: the "up to" quality the caller picked (DOWNLOAD_QUALITIES).
+    ``allow_low_fallback=False``: never fall back to the 360p-only strategy —
+    fail with a clear message instead. The clip pipeline passes False whenever
+    the pick is above 360p; other callers keep the old behaviour by default.
     """
     # SSRF guard: block non-http(s) schemes and private/loopback/metadata hosts
     # before handing the URL to yt-dlp.
@@ -794,14 +859,7 @@ def download_youtube_video(url, output_dir="."):
     # DIRECT attempt too, so with DIRECT_FIRST=1 (which serves most downloads)
     # every YouTube source arrived at 720p and, since the reframe inherits the
     # source height, 80% of delivered clips came out 406x720 (audited 25-jul-2026).
-    def _hd_fmt_for(capped):
-        if capped:
-            return ('bestvideo[vcodec^=avc1][height<=720][ext=mp4]+bestaudio[ext=m4a]/'
-                    'bestvideo[vcodec^=avc1][height<=720]+bestaudio/'
-                    'best[height<=720][ext=mp4]/best[height<=720]/best')
-        return ('bestvideo[vcodec^=avc1][height<=1080][ext=mp4]+bestaudio[ext=m4a]/'
-                'bestvideo[vcodec^=avc1][height<=1080]+bestaudio/'
-                'best[height<=1080][ext=mp4]/best[ext=mp4]/best')
+    # The per-job quality pick is applied inside download_format.
     fallback_fmt = 'best[ext=mp4]/best'
 
     def _base_opts(extractor_args, proxy):
@@ -831,8 +889,31 @@ def download_youtube_video(url, output_dir="."):
 
     def _attempt(extractor_args, fmt, proxy):
         _dl_bytes["total"] = 0
-        with yt_dlp.YoutubeDL(_base_opts(extractor_args, proxy)) as ydl:
+        # Run format selection on the metadata pass (same options as the
+        # download) so the quality actually chosen and its size are known
+        # BEFORE any bytes move: logged for the user, checked against the disk.
+        with yt_dlp.YoutubeDL({**_base_opts(extractor_args, proxy), 'format': fmt}) as ydl:
             info = ydl.extract_info(url, download=False)
+        chosen = info.get('requested_formats') or [info]
+        est = estimate_download_bytes(chosen, info.get('duration'))
+        heights = [c.get('height') for c in chosen if c.get('height')]
+        got = f"{max(heights)}p" if heights else "unknown resolution"
+        codecs = [str(c.get('vcodec')).split('.')[0] for c in chosen
+                  if c.get('vcodec') not in (None, 'none')]
+        print(f"📐 Selected {got} {'/'.join(codecs)} (up to {max_height}p requested), "
+              f"~{est / 1024**2:.0f} MB")
+        if est:
+            free = shutil.disk_usage(output_dir).free
+            # yt-dlp keeps the separate video and audio parts until the merged
+            # file is written, so the peak is ~2x the download, plus 1 GB for
+            # the clips rendered next.
+            need = 2 * est + 1024**3
+            if need > free:
+                raise DownloadSpaceError(
+                    f"Not enough disk space for {got}: needs ~{need / 1024**3:.1f} GB free "
+                    f"(~{est / 1024**3:.1f} GB download, merged in place), "
+                    f"{free / 1024**3:.1f} GB free. Pick a lower quality under "
+                    f"advanced options, or free some disk space.")
         sanitized = sanitize_filename(info.get('title', 'youtube_video'))
         expected = os.path.join(output_dir, f'{sanitized}.mp4')
         if os.path.exists(expected):
@@ -857,10 +938,11 @@ def download_youtube_video(url, output_dir="."):
     attempts = [
         (label,
          fallback_args if label == 'fallback' else hd_args,
-         fallback_fmt if label == 'fallback' else _hd_fmt_for(capped),
+         fallback_fmt if label == 'fallback' else download_format(max_height, capped),
          proxy)
         for label, capped, proxy in plan_download_attempts(
-            _direct_first, _statics, _proxy, bool(hd_args), youtube=is_youtube_url(url))
+            _direct_first, _statics, _proxy, bool(hd_args), youtube=is_youtube_url(url),
+            allow_fallback=allow_low_fallback)
     ]
     if not is_youtube_url(url):
         print("🌐 Direct file URL: downloading from the server's own IP (no proxy).")
@@ -873,7 +955,14 @@ def download_youtube_video(url, output_dir="."):
         # bound to the IP that extracted it, and the residential proxy rotates
         # its exit IP between requests. Retrying re-extracts and usually lands
         # on a consistent IP (3 of 62 downloads hit this on 22-jul-2026).
-        for retry in range(2):
+        #
+        # HD attempts retry on ANY error, three tries: on this install their
+        # failure is the PO-token script (deno) dying intermittently — the job
+        # that hit it on 3-sep-2026 downloaded that same video at 1080p on a
+        # rerun, and the old one-try rule sent it straight to 360p.
+        is_hd = label.startswith('HD')
+        tries = 3 if is_hd else 2
+        for retry in range(tries):
             try:
                 print(f"📥 Download attempt: {label}" + (f" (retry {retry})" if retry else ""))
                 sanitized_title = _attempt(ea, fmt, proxy)
@@ -883,24 +972,41 @@ def download_youtube_video(url, output_dir="."):
                 used_proxy = proxy is not None and proxy == _proxy
                 print(f"✅ Download succeeded ({label}).")
                 break
+            except DownloadSpaceError as e:
+                # Every attempt would hit the same disk: stop, don't retry.
+                print(f"❌ {e}")
+                raise
             except Exception as e:
                 last_err = e
-                print(f"⚠️  Download attempt '{label}' failed: {str(e)[:200]}")
-                retryable = '403' in str(e) or 'Forbidden' in str(e)
-                if not retryable or retry == 1:
+                # 500, not 200: the deno failure's reason came after its full
+                # command line and was cut off, leaving nothing to diagnose.
+                print(f"⚠️  Download attempt '{label}' failed: {str(e)[:500]}")
+                retryable = is_hd or '403' in str(e) or 'Forbidden' in str(e)
+                if not retryable or retry == tries - 1:
                     break
-                time.sleep(3)
+                time.sleep(3 * (retry + 1))
         if sanitized_title is not None:
             break
 
     if sanitized_title is None:
         import sys
+        if not allow_low_fallback and is_youtube_url(url):
+            # The 360p-only fallback was deliberately skipped (a higher quality
+            # was picked), so say that plainly instead of the generic reason.
+            reason = (f"YouTube refused the HD download for this video after retries. "
+                      f"OpenShorts stopped instead of turning YouTube's 360p copy into "
+                      f"blurry clips (you asked for up to {max_height}p).")
+            solution = ("try again in a few minutes, pick 360p under advanced options, "
+                        "or download the video yourself and use the 'Upload Video' tab.")
+        else:
+            reason = "YouTube blocked the request or the download tooling is out of date."
+            solution = "download the video manually and use the 'Upload Video' tab."
         error_msg = f"""
 ❌ ================================================================= ❌
 ❌ FATAL ERROR: YOUTUBE DOWNLOAD FAILED (all strategies)
 ❌ ================================================================= ❌
-REASON: YouTube blocked the request or the download tooling is out of date.
-👇 SOLUTION FOR USER: download the video manually and use the 'Upload Video' tab.
+REASON: {reason}
+👇 SOLUTION FOR USER: {solution}
 Technical Details: {str(last_err)}
 """
         print(error_msg, file=sys.stdout)
@@ -923,6 +1029,19 @@ Technical Details: {str(last_err)}
         # proxy — direct-first successes are free bandwidth.
         print(f"PROXY_BYTES={_dl_bytes['total']}")
     print(f"✅ Video downloaded in {time.time() - step_start_time:.2f}s: {downloaded_file}")
+    # What actually landed on disk, not what was requested: this line is how a
+    # silent quality loss (the 3-sep-2026 job got 640x360) becomes visible.
+    try:
+        probe = subprocess.run(
+            ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+             '-show_entries', 'stream=codec_name,width,height',
+             '-of', 'default=noprint_wrappers=1', downloaded_file],
+            capture_output=True, text=True, timeout=30).stdout
+        fields = dict(line.split('=', 1) for line in probe.splitlines() if '=' in line)
+        print(f"📐 Downloaded source: {fields.get('width')}x{fields.get('height')} "
+              f"{fields.get('codec_name')}")
+    except Exception:
+        pass  # informational only
     return downloaded_file, sanitized_title
 
 def finalize_clip_passthrough(input_video, final_output_video):
@@ -1772,6 +1891,10 @@ if __name__ == '__main__':
     parser.add_argument('--skip-analysis', action='store_true', help="Skip AI analysis and convert the whole video.")
     parser.add_argument('--format', type=str, default="auto", choices=["auto", "vertical", "horizontal", "square"],
                         help="Output aspect: vertical/auto (9:16), horizontal (keep 16:9), square (1:1).")
+    parser.add_argument('--quality', type=int, default=DEFAULT_DOWNLOAD_QUALITY,
+                        choices=DOWNLOAD_QUALITIES,
+                        help="URL sources: download up to this height. Above 360 the "
+                             "360p-only fallback is disabled; the job stops instead.")
     parser.add_argument('--transcript', type=str,
                         help="Path to a precomputed transcript JSON (transcribe_media shape); skips transcription.")
 
@@ -1801,7 +1924,9 @@ if __name__ == '__main__':
             else:
                 output_dir = "."
         
-        input_video, video_title = download_youtube_video(args.url, output_dir)
+        input_video, video_title = download_youtube_video(
+            args.url, output_dir, max_height=args.quality,
+            allow_low_fallback=args.quality <= 360)
     else:
         input_video = args.input
         video_title = os.path.splitext(os.path.basename(input_video))[0]

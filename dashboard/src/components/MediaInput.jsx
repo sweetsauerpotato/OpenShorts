@@ -36,6 +36,12 @@ export default function MediaInput({ onProcess, isProcessing }) {
     const [layout, setLayout] = useState(() => {
         try { return localStorage.getItem('os_layout') || 'auto'; } catch { return 'auto'; }
     });
+    // Download quality for pasted links ("up to"; a video that tops out lower
+    // gets its best). Uploads keep their own resolution, so the row is hidden
+    // there. Persisted like the layout so a chosen quality sticks.
+    const [quality, setQuality] = useState(() => {
+        try { return localStorage.getItem('os_quality') || '1080'; } catch { return '1080'; }
+    });
     const infoRef = useRef(null);
 
     // Close the compatibility popover on any outside click.
@@ -90,9 +96,10 @@ export default function MediaInput({ onProcess, isProcessing }) {
             localStorage.setItem('os_auto_hook', autoHook ? '1' : '0');
             localStorage.setItem('os_auto_hook_style', autoHookStyle);
             localStorage.setItem('os_layout', layout);
+            localStorage.setItem('os_quality', quality);
         } catch { /* ignore */ }
         if (mode === 'url' && url) {
-            onProcess({ type: 'url', payload: url, acknowledged: true, outputFormat, ...advanced });
+            onProcess({ type: 'url', payload: url, acknowledged: true, outputFormat, quality, ...advanced });
         } else if (mode === 'file' && file) {
             onProcess({ type: 'file', payload: file, acknowledged: true, outputFormat, ...advanced });
         }
@@ -252,7 +259,8 @@ export default function MediaInput({ onProcess, isProcessing }) {
                     >
                         <ChevronDown size={14} className={`transition-transform ${showAdvanced ? 'rotate-180' : ''}`} />
                         advanced options
-                        {(targetClips || clipMinSeconds || clipMaxSeconds || !autoHook) && (
+                        {(targetClips || clipMinSeconds || clipMaxSeconds || !autoHook
+                            || (mode === 'url' && quality !== '1080')) && (
                             <span className="text-brass">·</span>
                         )}
                     </button>
@@ -308,6 +316,24 @@ export default function MediaInput({ onProcess, isProcessing }) {
                                     <option value="none">Single crop only</option>
                                 </select>
                             </div>
+                            {mode === 'url' && (
+                                <div className="col-span-1 sm:col-span-3 flex flex-wrap items-center justify-between gap-3 pt-3 sm:pt-1 border-t border-rule">
+                                    <span className="text-xs text-ink2">download quality</span>
+                                    <select
+                                        value={quality}
+                                        onChange={(e) => setQuality(e.target.value)}
+                                        className="input-field !w-auto text-xs py-1.5"
+                                        aria-label="download quality"
+                                    >
+                                        <option value="360">360p</option>
+                                        <option value="480">480p</option>
+                                        <option value="720">720p</option>
+                                        <option value="1080">1080p (recommended)</option>
+                                        <option value="1440">1440p (large download)</option>
+                                        <option value="2160">4K (very large, slow)</option>
+                                    </select>
+                                </div>
+                            )}
                             <div className="col-span-1 sm:col-span-3 flex flex-wrap items-center justify-between gap-3 pt-3 sm:pt-1 border-t border-rule">
                                 <label className="flex items-center gap-2 text-xs text-ink2 cursor-pointer select-none">
                                     <input

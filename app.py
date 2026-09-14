@@ -63,6 +63,11 @@ UPLOADS_MAX_GB = int(os.environ.get("UPLOADS_MAX_GB", "15"))
 # Pre-flight quality gate: warn before processing a YouTube source below this
 # height (0 disables). Only applies to URLs; uploads are whatever the user gave.
 QUALITY_GATE_MIN_HEIGHT = int(os.environ.get("QUALITY_GATE_MIN_HEIGHT", "720"))
+# Per-job download quality for URL sources ("up to N px tall"). Mirrors
+# main.DOWNLOAD_QUALITIES — app.py never imports main (it runs it as a
+# subprocess), so tests/test_download_quality.py keeps the two in sync.
+DOWNLOAD_QUALITIES = (360, 480, 720, 1080, 1440, 2160)
+DEFAULT_DOWNLOAD_QUALITY = 1080
 # Reject sources shorter than this before starting (0 disables). A 24s YouTube
 # Short cannot yield 15-60s clips: Gemini returns nothing, the job burns
 # managed minutes and dies with "no usable clips" (prod 20-ago: 3 of 5 recent
@@ -2134,6 +2139,7 @@ async def process_endpoint(
     thumbnail_session_id: Optional[str] = Form(None),
     captions: Optional[str] = Form(None),
     upload_id: Optional[str] = Form(None),
+    quality: Optional[str] = Form(None),
 ):
     api_key = await resolve_gemini(request)
     if not api_key and not await llm_available_without_key():
@@ -2161,10 +2167,26 @@ async def process_endpoint(
         thumbnail_session_id = body.get("thumbnail_session_id")
         captions = body.get("captions")
         upload_id = body.get("upload_id")
+        quality = body.get("quality")
 
     # Normalize output format (auto = keep pipeline default).
     if output_format not in ("vertical", "horizontal", "square"):
         output_format = "auto"
+
+    # Download quality: URL sources only (an upload's resolution is fixed).
+    # Absent = 1080, the long-standing cap, so callers that never send it get
+    # the same format selection as before. "720p" and 720 both parse; anything
+    # else is a 400 rather than a quietly different download.
+    if quality in (None, ""):
+        download_quality = DEFAULT_DOWNLOAD_QUALITY
+    else:
+        try:
+            download_quality = int(str(quality).strip().lower().rstrip("p"))
+        except ValueError:
+            download_quality = None
+        if download_quality not in DOWNLOAD_QUALITIES:
+            raise HTTPException(status_code=400, detail=(
+                "quality must be one of " + ", ".join(f"{q}p" for q in DOWNLOAD_QUALITIES)))
 
     # Accepts a JSON list or a comma-separated form field.
     if isinstance(layouts, str):
@@ -2222,8 +2244,10 @@ async def process_endpoint(
         if MIN_SOURCE_SECONDS > 0 and 0 < source_duration < MIN_SOURCE_SECONDS:
             _reject_short_source(source_duration)
         max_height = int(probe.get("max_height") or 0)
+        # Warn only below what the user actually asked for: someone who picked
+        # 480p on a 480p video made a choice, not a mistake.
         if not force_low and QUALITY_GATE_MIN_HEIGHT > 0 \
-                and 0 < max_height < QUALITY_GATE_MIN_HEIGHT:
+                and 0 < max_height < min(QUALITY_GATE_MIN_HEIGHT, download_quality):
             print(f"⚠️ Quality gate: only {max_height}p available for {url} — asking user first.")
             return JSONResponse({
                 "needs_confirmation": True,
@@ -2341,7 +2365,7 @@ async def process_endpoint(
         # Keep the downloaded source inside the job dir: the clip editor's
         # re-render path cuts new segments from it, and it ages out with the
         # rest of the job (retention window + OUTPUT_MAX_GB cap) either way.
-        cmd.extend(["-u", url, "--keep-original"])
+        cmd.extend(["-u", url, "--keep-original", "--quality", str(download_quality)])
     elif thumb_session:
         # Hardlink (or copy) the session's video under the job's name so source
         # lookup, the clip editor and the preview treat it exactly like a normal
