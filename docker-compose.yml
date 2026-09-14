@@ -17,6 +17,10 @@ services:
     container_name: openshorts-frontend
     ports:
       - "5175:5173"
+    environment:
+      # Docker Desktop doesn't forward file-change events into bind mounts, so
+      # vite.config.js polls when this is set: edits show without a restart.
+      - VITE_USE_POLLING=1
     volumes:
       - ./dashboard:/app
       - /app/node_modules
