@@ -8,8 +8,11 @@ Read-only with respect to the pipeline: ``get_viral_clips`` touches no disk and
 renders no video, so a comparison costs only the model calls. Transcription is
 the expensive part and is cached beside the video.
 
-    # inside the backend container
-    python tools/compare_selection.py --video demo.mp4
+    # inside the backend container. Keep sources in .cache/harness/ (gitignored),
+    # NEVER uploads/: the app deletes uploads older than UPLOAD_TTL_SECONDS (6h),
+    # and the transcript cache sits beside the source, so both vanish — a 55-min
+    # transcript (~15 min of CPU) was lost that way between sessions.
+    python tools/compare_selection.py --video .cache/harness/source.webm
     python tools/compare_selection.py --transcript output/<job>/x_metadata.json
     python tools/compare_selection.py --video x.mp4 --providers ollama --runs 2
 
@@ -225,18 +228,30 @@ def run_once(provider, transcript, duration, seed=None):
         elif rec["stage"] == "detail":
             raw_clips.extend(payload.get("shorts", []) or [])
 
-    band_violations, out_of_window = [], []
+    band_violations, out_of_window, echoed = [], [], []
     for c in raw_clips:
         try:
-            dur = float(c.get("end", 0)) - float(c.get("start", 0))
+            start, end = float(c.get("start", 0)), float(c.get("end", 0))
         except (TypeError, ValueError):
             continue
+        dur = end - start
         if dur < min_secs - 0.01 or dur > max_secs + 0.01:
             band_violations.append(round(dur, 1))
         w = by_id.get(c.get("source_window_id"))
-        if w and not (w["start"] - 0.01 <= float(c.get("start", 0))
-                      and float(c.get("end", 0)) <= w["end"] + 0.01):
+        if w and not (w["start"] - 0.01 <= start and end <= w["end"] + 0.01):
             out_of_window.append(c.get("source_window_id"))
+        # The failure that sank qwen2.5:7b: returning the candidate window's
+        # own bounds as the clip. Snapping later clamps it to exactly max_secs,
+        # so it is invisible in final_clips — only the raw answer shows it.
+        if w and abs(start - w["start"]) < 1.0 and abs(end - w["end"]) < 1.0:
+            echoed.append(c.get("source_window_id"))
+
+    final = (result or {}).get("shorts", [])
+    playbook_hooks = [c.get("viral_hook_text") for c in final
+                      if _copies_playbook(c.get("viral_hook_text") or "")]
+    language = str(transcript.get("language") or "")
+    foreign = [text for c in final for text in _copy_fields(c)
+               if _foreign_script(text, language)]
 
     return {
         "provider": provider,
@@ -257,10 +272,79 @@ def run_once(provider, transcript, duration, seed=None):
         "band_violations": band_violations,
         "band_bounds": [min_secs, max_secs],
         "out_of_window": out_of_window,
-        "final_clips": (result or {}).get("shorts", []),
+        "echoed": echoed,
+        "playbook_hooks": playbook_hooks,
+        "foreign_script": foreign,
+        "final_clips": final,
         "cost": (result or {}).get("cost_analysis"),
         "call_seconds": [round(r["seconds"], 1) for r in calls],
     }
+
+
+# --------------------------------------------------------------------------
+# copy checks
+# --------------------------------------------------------------------------
+
+def _playbook():
+    """(examples, labels) read from the LIVE detail prompt, so this check can
+    never drift from the playbook the model is actually shown."""
+    import re
+    import gemini_worker
+    tpl = gemini_worker.DETAIL_PROMPT_TEMPLATE
+    section = tpl.split("HOOK PLAYBOOK", 1)[-1].split("(These are", 1)[0]
+    examples = re.findall(r'"([^"]+)"', section)
+    labels = [m.strip().lower() for m in re.findall(r"^- ([^:\n]+):", section, re.M)]
+    return examples, labels
+
+
+def _words(text):
+    import re
+    # Crude stem (drop a trailing "s") so "gets"/"get" count as the same word.
+    return {w[:-1] if len(w) > 3 and w.endswith("s") else w
+            for w in re.findall(r"[a-z0-9%']+", text.lower())}
+
+
+def _copies_playbook(hook):
+    """Verbatim or near-verbatim reuse of an example, or a leaked label.
+
+    Exact matching missed 'Why everyone gets this wrong.' against the example
+    'Why does everyone get this wrong?' on the first run, so near-copies are
+    judged by word overlap. A leaked label ('Story loop: ...') counts too —
+    the 3rd qwen2.5 run produced exactly that. 'POV:' alone is a legitimate use
+    of the pattern, so that label's first word is not flagged on its own.
+    """
+    examples, labels = _playbook()
+    hw = _words(hook)
+    if not hw:
+        return False
+    for ex in examples:
+        ew = _words(ex)
+        if ew and len(hw & ew) / len(hw | ew) >= 0.6:
+            return True
+    low = hook.strip().lower()
+    for label in labels:
+        for part in (p.strip() for p in label.split("/")):
+            if part and part != "pov" and low.startswith(part + ":"):
+                return True
+    return False
+
+
+def _copy_fields(clip):
+    return [str(clip.get(k) or "") for k in (
+        "viral_hook_text", "video_title_for_youtube_short",
+        "video_description_for_tiktok", "video_description_for_instagram")]
+
+
+def _foreign_script(text, language):
+    """CJK/Kana/Hangul in copy for a transcript that is none of those.
+
+    qwen2.5 leaked 'Herod's huge扩建' into an English hook. Narrow on purpose:
+    it only flags scripts that cannot belong to the transcript's language.
+    """
+    if language[:2] in ("zh", "ja", "ko"):
+        return False
+    return any("一" <= ch <= "鿿" or "぀" <= ch <= "ヿ"
+               or "가" <= ch <= "힯" for ch in text)
 
 
 # --------------------------------------------------------------------------
@@ -312,6 +396,10 @@ def report(run):
     print(f"    band violations   : {len(run['band_violations'])}/{len(run['raw_clips'])} "
           f"raw clips outside {lo:g}-{hi:g}s {run['band_violations'][:6]}")
     print(f"    out-of-window     : {len(run['out_of_window'])}")
+    print(f"    WHOLE-WINDOW ECHO : {len(run['echoed'])}/{len(run['raw_clips'])} "
+          f"{run['echoed'][:6]}   <- returns the window instead of choosing")
+    print(f"    playbook hooks    : {len(run['playbook_hooks'])} {run['playbook_hooks'][:4]}")
+    print(f"    foreign script    : {len(run['foreign_script'])} {run['foreign_script'][:3]}")
     print(f"    final clips       : {len(run['final_clips'])} (after word-snapping)")
     for c in run["final_clips"]:
         d = c.get("end", 0) - c.get("start", 0)
