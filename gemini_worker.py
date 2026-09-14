@@ -201,21 +201,41 @@ def _log(message: str) -> None:
         stream.write(safe_text + "\n")
     stream.flush()
 
+# "Score EVERY window" replaced "Choose up to 3 windows from this batch" on
+# 14-sep-2026. With the cap only 19-20 of a 55-min video's 51 windows ever got
+# a score, so the other 31-32 could never be picked; now all 51 do (2 runs).
+# The anchored scale spread the scores (6-8 distinct values, all but one within
+# 75-92, became 21-22 across 5-88) but did not end ties: flash-lite still
+# answers on a coarse grid (72, 75, 78, 80, 82, 85, 88) and the top 10 kept 7-9
+# tied pairs (was 10-14). A cap of 3 per batch of 8 bites when strong moments are adjacent,
+# because adjacent windows share a batch: with a topic instruction, 3 of the
+# top 4 windows sat in one batch.
 SCORE_PROMPT_TEMPLATE = """
 You are a senior short-form video strategist.
-Select the MOST viral candidate windows from this batch.
+Score every candidate window in this batch: how well would the best moment
+inside it work as a standalone short?
 
 Rules:
 - Return only valid JSON.
-- Choose up to 3 windows from this batch.
-- `score` must be an integer from 0 to 100.
+- Score EVERY window in this batch, weak ones included: one entry per window
+  id, in the order given. A window left out can never be picked, so leaving
+  one out is worse than scoring it low.
+- `score` must be an integer from 0 to 100, on this scale:
+  - 90-100: the moment's first 2 seconds stop a cold viewer AND it pays off on its own
+  - 70-89: a strong hook OR a clear payoff, not both
+  - 40-69: needs earlier context, or starts slow before it gets good
+  - 0-39: filler (intros, outros, housekeeping, sponsor reads, rambling transitions)
+- Judge each window against this scale, not against the other windows in this
+  batch: scores are compared across the whole video.
+- Different strengths get different scores. Use any integer, not a few round
+  values; give two windows the same score only when you cannot tell which
+  would perform better.
 - THE 2-SECOND TEST is the main criterion: would the first 2 seconds of this
   moment force a cold viewer (no context) to keep watching? Windows that only
   work with prior context score low.
-- Prefer windows with strong hooks, conflict, surprise, outrage, emotion,
-  novelty, big numbers, or a clear payoff.
-- Ignore weak filler, housekeeping, outros, rambling transitions, and
-  low-signal padding unless there is an obvious hook or payoff.
+- Strong signals: hooks, conflict, surprise, outrage, emotion, novelty, big
+  numbers, a clear payoff.
+- `reason`: at most 12 words.
 
 TRANSCRIPT_LANGUAGE: {language}
 VIDEO_DURATION_SECONDS: {video_duration}

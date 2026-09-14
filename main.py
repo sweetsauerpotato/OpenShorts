@@ -27,7 +27,8 @@ import layout_picker
 import llm_provider
 from clip_selection import (build_transcript_windows, clip_count_targets,
                             clip_duration_bounds, snap_clip_to_words,
-                            trim_to_best, normalize_clip_instructions,
+                            trim_to_best, best_window_scores, build_shortlist,
+                            normalize_clip_instructions,
                             with_clip_instructions, CLIP_INSTRUCTIONS_MAX_CHARS)
 from ffmpeg_utils import (video_encode_args, audio_encode_args, QUALITY,
                           QUALITY_FAST, METADATA_SCRUB)
@@ -1688,13 +1689,16 @@ def get_viral_clips(transcript_result, video_duration, instructions=None):
 
         # Shortlist the top windows; scale with duration so long videos surface
         # more candidates without exploding the detail call.
-        scored.sort(key=lambda w: w.get("score", 0), reverse=True)
         target = max(3, min(10, int(video_duration // 90) + 2))
-        by_id = {w["id"]: w for w in windows}
-        shortlist = [by_id[w["id"]] for w in scored[:target] if w.get("id") in by_id]
-        if not shortlist:
-            shortlist = windows[:target]  # scoring returned nothing usable
-        print(f"   Shortlisted {len(shortlist)} window(s) for detail.")
+        best = best_window_scores(scored, windows)
+        shortlist = build_shortlist(best, windows, target)
+        if best:
+            shown = ", ".join(f"{best[w['id']]:g}" for w in shortlist)
+            print(f"   Scored {len(best)}/{len(windows)} window(s); shortlisted "
+                  f"{len(shortlist)} for detail (scores {shown}).")
+        else:
+            print(f"   Scoring returned nothing usable; using the first "
+                  f"{len(shortlist)} window(s) for detail.")
 
         # --- Pass 2: detailed clip extraction on the shortlist ---
         min_clips, max_clips = clip_count_targets(len(shortlist))

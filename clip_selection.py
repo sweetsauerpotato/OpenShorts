@@ -200,6 +200,48 @@ def build_transcript_windows(transcript_result, video_duration,
     return windows
 
 
+def best_window_scores(scored, windows):
+    """{window id: highest score} from the scoring pass's answers.
+
+    Only ids of real windows count: the old inline sort cut the top N BEFORE
+    dropping unknown ids, so a made-up id took a shortlist slot and matched
+    nothing. A repeated id keeps its highest score, and an entry without a
+    numeric score is skipped (the old sort raised TypeError on a string score,
+    which failed clip detection for the whole job).
+    """
+    import math
+
+    valid = {w["id"] for w in windows}
+    best = {}
+    for entry in scored or []:
+        if not isinstance(entry, dict) or entry.get("id") not in valid:
+            continue
+        try:
+            score = float(entry.get("score"))
+        except (TypeError, ValueError):
+            continue
+        if math.isnan(score):
+            continue
+        if score > best.get(entry["id"], -math.inf):
+            best[entry["id"]] = score
+    return best
+
+
+def build_shortlist(scores, windows, target):
+    """The ``target`` best-scoring windows for the detail pass, best first.
+
+    Ties go to the earlier window, explicitly, so the shortlist does not depend
+    on the order the model happened to list its answers in. When scoring
+    produced nothing usable, the first windows are used so the job still gets
+    clips instead of failing.
+    """
+    target = max(1, int(target or 1))
+    position = {w["id"]: i for i, w in enumerate(windows)}
+    ranked = sorted((wid for wid in scores if wid in position),
+                    key=lambda wid: (-scores[wid], position[wid]))
+    return [windows[position[wid]] for wid in ranked[:target]] or list(windows[:target])
+
+
 def snap_clip_to_words(start, end, words, video_duration,
                        min_duration=15.0, max_duration=60.0,
                        search_window=1.5, max_lead=0.35, max_tail=0.45):
