@@ -1,4 +1,5 @@
 """Tests for the pure clip-selection helpers (windows, snapping, pricing)."""
+import datetime
 import re
 
 import pytest
@@ -98,6 +99,25 @@ class TestPricing:
     def test_unknown_model_returns_none(self):
         assert lookup_model_prices("gpt-9-mega") is None
         assert lookup_model_prices(None) is None
+
+    def test_default_clip_selection_model(self):
+        assert lookup_model_prices("gemini-3.1-flash-lite") == (0.25, 1.50)
+
+    @pytest.mark.parametrize("model", ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash"])
+    def test_newer_flash_models_are_priced_not_estimated(self, model):
+        assert lookup_model_prices(model, today=datetime.date(2026, 9, 14)) == (0.75, 3.75)
+
+    def test_flash_lite_is_not_priced_as_flash(self):
+        # Prefix match: "gemini-3.5-flash-lite" starts with "gemini-3.5-flash".
+        assert lookup_model_prices("gemini-3.5-flash-lite") == (0.30, 2.50)
+        assert lookup_model_prices("gemini-3.5-flash") == (1.50, 9.00)
+
+    def test_announced_price_change_applies_from_its_first_day(self):
+        before, after = datetime.date(2026, 12, 31), datetime.date(2027, 1, 1)
+        assert lookup_model_prices("gemini-3.8-flash", today=before) == (0.75, 3.75)
+        assert lookup_model_prices("gemini-3.8-flash", today=after) == (1.50, 7.50)
+        # Models without an announced change are unaffected by the date.
+        assert lookup_model_prices("gemini-3.1-flash-lite", today=after) == (0.25, 1.50)
 
 
 class TestCompactWords:

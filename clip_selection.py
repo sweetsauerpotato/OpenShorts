@@ -5,9 +5,16 @@ Standard-library only so both main.py and gemini_worker.py can import it and
 the logic stays unit-testable without the heavy video dependencies.
 """
 
-# USD per 1M tokens (input, output incl. thinking), from ai.google.dev pricing.
+# USD per 1M tokens (input, output incl. thinking), from ai.google.dev pricing
+# (text/image/video input; checked 14-sep-2026 against the page of 4-sep-2026).
+# A model missing here is shown at gemini_worker's estimated price, so add new
+# models when they are used: 3.6-3.8 Flash were missing and showed $0.50/$3.00.
 MODEL_PRICES = {
+    "gemini-3.8-flash": (0.75, 3.75),
+    "gemini-3.7-flash": (0.75, 3.75),
+    "gemini-3.6-flash": (0.75, 3.75),
     "gemini-3.5-flash": (1.50, 9.00),
+    "gemini-3.5-flash-lite": (0.30, 2.50),
     "gemini-3.1-flash-lite": (0.25, 1.50),
     "gemini-3-flash-preview": (0.50, 3.00),
     "gemini-2.5-flash-lite": (0.10, 0.40),
@@ -19,15 +26,36 @@ MODEL_PRICES = {
     "ollama/": (0.0, 0.0),
 }
 
+# Announced price changes: key -> (first day, prices from that day). Google
+# lists the 3.6-3.8 Flash prices above as valid "through December 31, 2026".
+MODEL_PRICE_CHANGES = {
+    "gemini-3.8-flash": ("2027-01-01", (1.50, 7.50)),
+    "gemini-3.7-flash": ("2027-01-01", (1.50, 7.50)),
+    "gemini-3.6-flash": ("2027-01-01", (1.50, 7.50)),
+}
 
-def lookup_model_prices(model_name):
-    """Longest-prefix match against MODEL_PRICES; None if unknown."""
+
+def lookup_model_prices(model_name, today=None):
+    """Longest-prefix match against MODEL_PRICES; None if unknown.
+
+    Longest wins so "gemini-3.5-flash-lite" is not priced as "gemini-3.5-flash"
+    (5x its input price) — before it had its own entry, it was. ``today`` (a
+    date, default the current one) decides whether a MODEL_PRICE_CHANGES entry
+    has taken effect.
+    """
+    import datetime
+
     name = str(model_name or "").lower()
     best_key = None
     for key in MODEL_PRICES:
         if name.startswith(key) and (best_key is None or len(key) > len(best_key)):
             best_key = key
-    return MODEL_PRICES[best_key] if best_key else None
+    if best_key is None:
+        return None
+    change = MODEL_PRICE_CHANGES.get(best_key)
+    if change and (today or datetime.date.today()).isoformat() >= change[0]:
+        return change[1]
+    return MODEL_PRICES[best_key]
 
 
 def clip_count_targets(n_windows):
