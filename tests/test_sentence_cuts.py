@@ -74,11 +74,26 @@ class TestSentenceSpans:
         spans = cs.sentence_spans(_speech([f"it is {token} next one here."]))
         assert [s["text"].split()[-1] for s in spans] == [token, "here."]
 
-    def test_an_unpunctuated_stretch_is_split_at_its_longest_pause(self):
+    def test_an_unpunctuated_stretch_is_split_at_a_real_pause(self):
         first = [{"w": f" a{k}", "s": k * 0.4, "e": k * 0.4 + 0.3} for k in range(60)]   # 24 s
         second = [{"w": f" b{k}", "s": 26.0 + k * 0.4, "e": 26.3 + k * 0.4} for k in range(60)]
         spans = cs.sentence_spans(first + second, max_span_seconds=30.0)
         assert [(s["first"], s["last"]) for s in spans] == [(0, 59), (60, 119)]
+
+    def test_a_run_with_no_pauses_splits_into_balanced_chunks_not_single_words(self):
+        """The documentary's 50 s stretch: no punctuation and every gap 0.00 s.
+        Splitting at the 'longest' pause peeled off one word at a time."""
+        run = [{"w": f" w{k}", "s": k * 0.35, "e": (k + 1) * 0.35} for k in range(180)]  # 63 s
+        spans = cs.sentence_spans(run, max_span_seconds=30.0)
+        lengths = [s["end"] - s["start"] for s in spans]
+        assert max(lengths) <= 30.0
+        assert min(lengths) >= 10.0, lengths
+
+    def test_such_a_run_splits_before_a_capitalised_word(self):
+        run = [{"w": f" w{k}", "s": k * 0.35, "e": (k + 1) * 0.35} for k in range(180)]
+        run[95]["w"] = " But"
+        spans = cs.sentence_spans(run, max_span_seconds=40.0)
+        assert any(s["text"].startswith("But") for s in spans)
 
     def test_empty(self):
         assert cs.sentence_spans([]) == []
@@ -179,11 +194,14 @@ class _DetailEndsOnTheNextLine:
 
     def __init__(self):
         self.models = self
+        self.detail_prompts = []
 
     def generate_content(self, model=None, contents=None, config=None):
         import re
         schema = config.response_schema
         ids = re.findall(r'"id": "(window_\d+)"', contents)
+        if schema.__name__ != "ScoreResponse":
+            self.detail_prompts.append(contents)
         if schema.__name__ == "ScoreResponse":
             payload = {"windows": [{"id": i, "start": 0.0, "end": 1.0, "score": 80, "reason": "r"}
                                    for i in ids]}
@@ -197,14 +215,47 @@ class _DetailEndsOnTheNextLine:
                                      candidates=[], usage_metadata=None)
 
 
-def test_get_viral_clips_cuts_on_the_sentence(monkeypatch):
+def _run_pipeline(monkeypatch):
     main = pytest.importorskip("main")
     for var in ("CLIP_MIN_SECONDS", "CLIP_MAX_SECONDS", "CLIP_TARGET_MIN", "CLIP_TARGET_MAX"):
         monkeypatch.delenv(var, raising=False)
-    monkeypatch.setattr(main.llm_provider, "make_client", lambda: (_DetailEndsOnTheNextLine(), "fake"))
+    client = _DetailEndsOnTheNextLine()
+    monkeypatch.setattr(main.llm_provider, "make_client", lambda: (client, "fake"))
     segments = [{"start": WORDS[sp["first"]]["s"], "end": WORDS[sp["last"]]["e"], "text": sp["text"],
                  "words": [{"word": w["w"], "start": w["s"], "end": w["e"]}
                            for w in WORDS[sp["first"]:sp["last"] + 1]]} for sp in SPANS]
-    result = main.get_viral_clips({"language": "en", "segments": segments}, WORDS[-1]["e"])
+    return client, main.get_viral_clips({"language": "en", "segments": segments}, WORDS[-1]["e"])
+
+
+def test_get_viral_clips_cuts_on_the_sentence(monkeypatch):
+    _, result = _run_pipeline(monkeypatch)
     clip = result["shorts"][0]
     assert _last_word(WORDS, clip["start"], clip["end"]) == "years."
+
+
+def test_pass_two_reads_whole_sentences_with_their_start_and_end(monkeypatch):
+    client, _ = _run_pipeline(monkeypatch)
+    prompt = client.detail_prompts[0]
+    for sp in SPANS:
+        assert f"[{sp['start']:.1f}-{sp['end']:.1f}] {sp['text']}" in prompt
+
+
+# --- the pass-2 prompt ----------------------------------------------------------
+
+def _detail_template():
+    import ast
+    import os
+    mod = ast.parse(open(os.path.join(os.path.dirname(__file__), "..", "gemini_worker.py"),
+                         encoding="utf-8").read())
+    return next(node.value.value for node in mod.body
+                if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "DETAIL_PROMPT_TEMPLATE")
+
+
+def test_the_prompt_takes_the_end_from_the_closing_sentence():
+    template = _detail_template()
+    # The instruction that put 71 of 73 raw ends on the next line's start.
+    assert "line just AFTER" not in template
+    assert "`end`   = the SECOND number of the sentence you close on." in template
+    assert "`start` = the FIRST number of the sentence you open on." in template
+    assert "END ON A FINISHED THOUGHT" in template

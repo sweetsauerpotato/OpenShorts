@@ -109,14 +109,29 @@ on a finished sentence stays; one or two words of a new sentence are cut back;
 a mid-sentence end finishes its sentence if that takes ≤ 8 s, else the nearest
 sentence end that keeps the band; a start moves earlier to its sentence start
 (≤ 8 s) or drops a ≤ 2-word tail of the previous one, never later, so the
-chosen opening stays. Sentences come from punctuation; spans over 30 s split at
-their longest pause, because Whisper sometimes leaves punctuation out.
-`tools/compare_selection.py --replay` re-cuts saved raw answers with no API
-calls: finished endings 16% -> 92% on the 55-min records (the 4 others end
-right before a capitalised new sentence Whisper did not punctuate), 38% -> 100%
-on the 10-min slice, 2/6 -> 6/6 on the job; no start moved later, no clip left
-15-60 s. The clip editor and MCP `recut_clip` keep word snapping on purpose:
-their cuts are deliberate.
+chosen opening stays. Sentences come from punctuation (`sentence_spans`).
+Whisper sometimes leaves it out, so a run-on "sentence" over 45 s is split near
+its middle, at a pause or before a capitalised word. Two versions of that were
+wrong: splitting at the "longest" pause peeled one word at a time off a 50 s
+stretch where every gap was 0.00 s (55 one-word lines, and pass 2 closed a
+clip on "that"); and a 30 s limit split run-ons of 30-37 s before proper
+nouns ("that is the | Al-Aqsa Mosque."). `tools/compare_selection.py --replay`
+re-cuts saved raw answers with no API calls: finished endings 16% -> 100% on
+the 55-min records, 56% -> 97% on the 10-min slice (its miss is where the slice
+itself cuts the transcript), 2/6 -> 6/6 on the job; no start moved later, no
+clip left 15-60 s. The clip editor and MCP `recut_clip` keep word snapping on
+purpose: their cuts are deliberate.
+
+**Pass 2 reads whole timed sentences.** Its `lines` are
+`"[912.4-918.9] sentence"` (the sentences that start in the window), and the
+prompt takes `start`/`end` straight from the opening and closing sentence and
+requires ending on a finished thought. The old lines were Whisper segments with
+only a start, so `end` had to be "the next line's start". Live, 55-min x2 twice
+(15-sep-2026): the model's own end lands on a finished sentence 53% -> 81%
+(22/27; the misses sit where Whisper left out a period, e.g. "...impure state |
+But"), cutting then moves ends by a median 0.3 s instead of repairing them,
+run-to-run clip agreement 2/6 -> 3/7 and 4/7, Tier 1 clean, pass-2 input
+~7.0k -> ~7.2k tokens and cost unchanged (1.51-1.57 cents).
 
 **The randomness left is in pass 2, not the ranking.** On the 10-min slice both
 runs sent the identical 8 windows to pass 2 and only 3 of 6 final clips
@@ -157,6 +172,12 @@ docker compose up --build   # Build and run full stack
 ```
 - Backend: http://localhost:8000 (FastAPI/Uvicorn)
 - Frontend: http://localhost:5175 (Vite proxies API calls to backend)
+- After editing a module the API process imports at startup (`app.py`,
+  `clip_selection.py`, `mcp_server.py`, ...), `docker restart openshorts-backend`.
+  Jobs run `main.py` in a fresh process, but the clip editor imports `main.py`
+  lazily inside the API process: on 15-sep-2026 a new `main.py` met the
+  startup-cached `clip_selection` there and every rerender failed with an
+  ImportError until the restart.
 
 ### Frontend Only (Dashboard)
 ```bash

@@ -321,6 +321,9 @@ def run_once(provider, transcript, duration, seed=None, instructions=None, keywo
         elif rec["stage"] == "detail":
             raw_clips.extend(payload.get("shorts", []) or [])
 
+    from clip_selection import sentence_spans
+    words = transcript_words(transcript)
+    spans = sentence_spans(words)
     band_violations, out_of_window, echoed = [], [], []
     for c in raw_clips:
         try:
@@ -331,7 +334,12 @@ def run_once(provider, transcript, duration, seed=None, instructions=None, keywo
         if dur < min_secs - 0.01 or dur > max_secs + 0.01:
             band_violations.append(round(dur, 1))
         w = by_id.get(c.get("source_window_id"))
-        if w and not (w["start"] - 0.01 <= start and end <= w["end"] + 0.01):
+        # A window's lines are the sentences that START in it, so its last
+        # line may end past the window's own end; closing on it is in bounds.
+        # Line times are shown to 0.1 s, so an exact copy can be 0.05 s off.
+        last_line_end = max([sp["end"] for sp in spans
+                             if w and w["start"] - 0.06 <= sp["start"] < w["end"]] or [0.0])
+        if w and not (w["start"] - 0.06 <= start and end <= max(w["end"], last_line_end) + 0.06):
             out_of_window.append(c.get("source_window_id"))
         # The failure that sank qwen2.5:7b: returning the candidate window's
         # own bounds as the clip. Snapping later clamps it to exactly max_secs,
@@ -369,7 +377,6 @@ def run_once(provider, transcript, duration, seed=None, instructions=None, keywo
     language = str(transcript.get("language") or "")
     foreign = [text for c in final for text in _copy_fields(c)
                if _foreign_script(text, language)]
-    words = transcript_words(transcript)
     final_ends, final_starts = cut_quality(final, words)
     raw_ends, _ = cut_quality(raw_clips, words)
 

@@ -263,26 +263,28 @@ Choose the BEST short clips from these shortlisted candidate windows.
 CLIP RULES:
 - Return only valid JSON.
 - Each clip must be {min_secs:g} to {max_secs:g} seconds long, in absolute seconds from the start of the source video.
-- Stay within the candidate window boundaries.
+- Stay within the candidate window: open and close on sentences from its `lines`.
 - A CLIP IS AN EXCERPT INSIDE A WINDOW, NEVER THE WINDOW ITSELF. The candidate
   windows are ~90 seconds; a clip is {min_secs:g}-{max_secs:g}. So `start` and `end` must
   NOT be the window's own start and end — copying those back is always wrong,
   even when the whole window is interesting. Find the strongest
   {min_secs:g}-{max_secs:g}s stretch inside it and cut there. Check before you answer:
   end - start must be between {min_secs:g} and {max_secs:g}.
-- HOW TO PICK THE CUT: each window's `lines` are its sentences, every one
-  prefixed with the absolute second it is spoken, like
-  "[912.4] But here's the part everyone skips over".
+- HOW TO PICK THE CUT: each window's `lines` are its whole sentences, each
+  prefixed with the absolute seconds it starts and ends, like
+  "[912.4-918.9] But here's the part everyone skips over."
   READ THE TIMESTAMPS OFF THESE LINES — never estimate a number.
-  `start` = the timestamp of the line you open on.
-  `end`   = the timestamp of the line just AFTER the one you close on
-            (or the window's `end` when you close on its last line).
-  Choose the opening and closing lines so that end - start lands between
-  {min_secs:g} and {max_secs:g} seconds.
+  `start` = the FIRST number of the sentence you open on.
+  `end`   = the SECOND number of the sentence you close on.
+  Choose the opening and closing sentences so that end - start lands between
+  {min_secs:g} and {max_secs:g} seconds. Silence around the cut is added
+  automatically, so give these numbers exactly.
+- END ON A FINISHED THOUGHT: the sentence you close on must complete the point
+  (the answer, the punchline, the conclusion). Never close on a setup, on a
+  question whose answer comes later, or on a sentence that only makes sense
+  with the next one.
 - THE 2-SECOND RULE: the clip MUST open on its strongest moment. If the first
   2 seconds would not stop a cold viewer from scrolling, move the start or skip the clip.
-- Start slightly before the hook and end slightly after the payoff when possible.
-- Do not cut in the middle of a word or phrase.
 - No generic intros/outros unless they are the hook.
 - STANDS ALONE: the clip must make sense to someone who has seen nothing else.
   If it opens on a pronoun, a "that", a "so anyway", or an answer whose question

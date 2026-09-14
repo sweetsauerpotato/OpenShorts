@@ -1728,32 +1728,33 @@ def get_viral_clips(transcript_result, video_duration, instructions=None):
         # --- Pass 2: detailed clip extraction on the shortlist ---
         min_clips, max_clips = clip_count_targets(len(shortlist))
 
-        # Pass 2 gets the same windows with a timestamp on every sentence.
-        # Scoring does not need them (it judges a window as a whole), so they
-        # are added here only — 7 of the 8 calls stay the size they were.
+        # Pass 2 gets the same windows as timed sentences. Scoring does not
+        # need them (it judges a window as a whole), so they are added here
+        # only — 7 of the 8 calls stay the size they were.
         #
-        # Why they are needed: the scoring payload carries one text blob and the
+        # Why timestamps: the scoring payload carries one text blob and the
         # window's own start/end, so choosing a cut INSIDE it means inventing a
         # number by estimating how far into ~1800 characters a moment falls.
-        # Gemini does that well enough; qwen2.5:7b-instruct could not and
-        # returned the window's own bounds as the clip on 6 of 6 clips, twice
-        # in a row, including after the prompt was changed to forbid exactly
-        # that (measured 8-sep-2026 on a 55-min source). It was never a wording
-        # problem — the number the model needed was not in its input. With these
-        # lines the cut is a value it can read off the page instead.
-        segments = [(float(s.get("start", 0)), str(s.get("text") or "").strip())
-                    for s in transcript_result.get("segments", [])
-                    if str(s.get("text") or "").strip()]
+        # qwen2.5:7b-instruct could not and returned the window's own bounds as
+        # the clip on 6 of 6 clips (8-sep-2026); with timed lines the cut is a
+        # value it can read off the page instead.
+        #
+        # Why whole sentences with a start AND an end: the lines used to be
+        # Whisper segments with only a start, so `end` had to be "the start of
+        # the line after", and 44-57% of Whisper segments end mid-sentence: 36 of
+        # 73 raw answers ended mid-statement (15-sep-2026). A sentence's own end
+        # is a number the model can copy, and it is always a finished one.
+        spans = sentence_spans(words)
 
         def _detail_payload(ws):
             out = []
             for w in ws:
-                lines = [f"[{start:.1f}] {text}" for start, text in segments
-                         if w["start"] - 0.01 <= start < w["end"]]
+                lines = [f"[{sp['start']:.1f}-{sp['end']:.1f}] {sp['text']}" for sp in spans
+                         if w["start"] - 0.01 <= sp["start"] < w["end"]]
                 out.append({"id": w["id"], "start": w["start"], "end": w["end"],
-                            # Fall back to the blob if a window somehow spans no
-                            # segment start, so the call degrades instead of
-                            # sending an empty window.
+                            # Fall back to the blob if a window somehow starts no
+                            # sentence, so the call degrades instead of sending
+                            # an empty window.
                             "lines": lines or [w["text"]]})
             return out
 
@@ -1780,7 +1781,6 @@ def get_viral_clips(transcript_result, video_duration, instructions=None):
         # Cut each proposed clip on whole sentences (+ a bit of silence): the
         # model's own bounds end mid-sentence or on the next sentence's first
         # word far more often than not. See snap_clip_to_sentences.
-        spans = sentence_spans(words)
         for n, s in enumerate(shorts, 1):
             old = (float(s.get("start", 0)), float(s.get("end", 0)))
             ns, ne = snap_clip_to_sentences(old[0], old[1], words, video_duration,

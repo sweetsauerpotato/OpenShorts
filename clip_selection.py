@@ -344,15 +344,18 @@ _MAX_TAIL_WORDS = 2   # "right?" before a start / "And" after an end is a fragme
 _MAX_TRIM = 1.5
 
 
-def sentence_spans(words, max_span_seconds=30.0):
+def sentence_spans(words, max_span_seconds=45.0):
     """The sentences of a transcript's word list, for cutting clips on whole sentences.
 
     ``words`` is the flat ``{'w','s','e'}`` list snap_clip_to_words takes, sorted by
     start. Returns ``[{"start", "end", "first", "last", "text"}]`` with inclusive
     word indices. A sentence ends on a word carrying terminal punctuation.
     Whisper punctuates, but not always: a "sentence" longer than
-    ``max_span_seconds`` is split at its longest pause, so an unpunctuated
-    stretch still has boundaries to cut on.
+    ``max_span_seconds`` is split (see _split_point), so an unpunctuated
+    stretch still has boundaries to cut on. 45 s, not 30: the documentary's
+    run-on "sentences" were 30-37 s in 10 of 11 cases, and splitting those put
+    boundaries before proper nouns ("that is the | Al-Aqsa Mosque.") that
+    pass 2 then closed clips on; whole, they end on their real period.
     """
     import re
 
@@ -369,7 +372,7 @@ def sentence_spans(words, max_span_seconds=30.0):
     while stack:
         a, b = stack.pop()
         if b > a and float(words[b]["e"]) - float(words[a]["s"]) > max_span_seconds:
-            cut = max(range(a, b), key=lambda k: float(words[k + 1]["s"]) - float(words[k]["e"]))
+            cut = _split_point(words, a, b)
             stack.append((cut + 1, b))
             stack.append((a, cut))
             continue
@@ -377,6 +380,30 @@ def sentence_spans(words, max_span_seconds=30.0):
                       "first": a, "last": b,
                       "text": " ".join(str(words[k]["w"]).strip() for k in range(a, b + 1))})
     return spans
+
+
+def _split_point(words, a, b):
+    """Where to split an over-long unpunctuated run ``words[a..b]``: after the
+    word nearest the run's middle among those followed by a real pause
+    (>= 0.3 s) or a capitalised word (not "I"); with no such cue, the word
+    nearest the middle.
+
+    Splitting at the single longest pause peeled off one word at a time when
+    Whisper left no gaps: on 15-sep-2026 a 50 s stretch of the documentary
+    (every gap 0.00 s) became 55 one-word "sentences", and pass 2 closed a clip
+    on "that".
+    """
+    import re
+
+    middle = (float(words[a]["s"]) + float(words[b]["e"])) / 2
+
+    def cue(k):
+        following = str(words[k + 1]["w"]).strip()
+        return (float(words[k + 1]["s"]) - float(words[k]["e"]) >= 0.3
+                or (following[:1].isupper() and re.split(r"['’]", following)[0] != "I"))
+
+    candidates = [k for k in range(a, b) if cue(k)] or list(range(a, b))
+    return min(candidates, key=lambda k: abs(float(words[k]["e"]) - middle))
 
 
 def snap_clip_to_sentences(start, end, words, video_duration, min_duration=15.0,
