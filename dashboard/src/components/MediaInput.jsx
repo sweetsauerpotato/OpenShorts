@@ -7,6 +7,19 @@ const SUPPORTED_PLATFORMS = [
     'Facebook', 'Instagram', 'Dailymotion', 'Reddit', 'Streamable',
 ];
 
+// Mirrors clip_selection.CLIP_INSTRUCTIONS_MAX_CHARS; the API rejects longer text.
+const CLIP_INSTRUCTIONS_MAX = 1000;
+
+// Starters for the instructions box. Each one INSERTS editable text: nothing is
+// hidden, what is in the box is exactly what the AI receives.
+const INSTRUCTION_PRESETS = [
+    { label: 'funny', text: 'Pick the funniest moments: jokes, banter, reactions and absurd situations.' },
+    { label: 'insights & tips', text: 'Pick moments that teach something: a concrete tip, a surprising fact or a clear takeaway.' },
+    { label: 'stories', text: 'Pick emotional or personal stories that have a clear payoff.' },
+    { label: 'hot takes', text: 'Pick bold opinions, disagreements and controversial statements.' },
+    { label: 'skip filler', text: 'Never pick intros, outros, sponsor reads, ads or housekeeping.' },
+];
+
 export default function MediaInput({ onProcess, isProcessing }) {
     const [youtubeUrlEnabled, setYoutubeUrlEnabled] = useState(true);
     // File upload is the primary path; the link is secondary.
@@ -42,6 +55,18 @@ export default function MediaInput({ onProcess, isProcessing }) {
     const [quality, setQuality] = useState(() => {
         try { return localStorage.getItem('os_quality') || '1080'; } catch { return '1080'; }
     });
+    // Creator instructions for clip selection. Deliberately NOT persisted: they
+    // are usually about one video, and a remembered "only moments about pricing"
+    // would quietly narrow the next, unrelated one. Presets cover recurring styles.
+    const [clipInstructions, setClipInstructions] = useState('');
+    const addInstructionPreset = (text) => {
+        setClipInstructions((current) => {
+            if (current.includes(text)) return current;
+            const next = current.trim() ? `${current.trimEnd()}\n${text}` : text;
+            // Never append half a sentence: skip the preset if it doesn't fit.
+            return next.length > CLIP_INSTRUCTIONS_MAX ? current : next;
+        });
+    };
     const infoRef = useRef(null);
 
     // Close the compatibility popover on any outside click.
@@ -91,6 +116,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
             autoHook,
             autoHookStyle,
             layout,
+            clipInstructions: clipInstructions.trim() || null,
         };
         try {
             localStorage.setItem('os_auto_hook', autoHook ? '1' : '0');
@@ -247,6 +273,36 @@ export default function MediaInput({ onProcess, isProcessing }) {
                                 </button>
                             );
                         })}
+                    </div>
+                </div>
+
+                {/* Creator instructions — optional; steers every clip-selection stage */}
+                <div className="mt-5">
+                    <div className="flex items-baseline justify-between gap-3 mb-2">
+                        <p className="eyebrow">what to clip · optional</p>
+                        <span className="readout">{clipInstructions.length}/{CLIP_INSTRUCTIONS_MAX}</span>
+                    </div>
+                    <textarea
+                        value={clipInstructions}
+                        onChange={(e) => setClipInstructions(e.target.value)}
+                        rows={2}
+                        maxLength={CLIP_INSTRUCTIONS_MAX}
+                        className="input-field resize-none text-sm"
+                        placeholder="e.g. only moments where the guest gives a concrete tip; skip the sponsor read"
+                        aria-label="clip instructions"
+                    />
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                        {INSTRUCTION_PRESETS.map((preset) => (
+                            <button
+                                key={preset.label}
+                                type="button"
+                                onClick={() => addInstructionPreset(preset.text)}
+                                className="btn-quiet !px-2.5 !py-1 !text-xs"
+                                title={preset.text}
+                            >
+                                + {preset.label}
+                            </button>
+                        ))}
                     </div>
                 </div>
 

@@ -807,6 +807,8 @@ function App() {
         auto_hook_style: data.autoHook ? (data.autoHookStyle || 'classic') : null,
         // 'auto' is the server default, so only a deliberate choice travels.
         layouts: data.layout && data.layout !== 'auto' ? data.layout : null,
+        // Creator instructions for clip selection; blank never travels.
+        clip_instructions: data.clipInstructions || null,
       };
 
       if (data.type === 'url') {
