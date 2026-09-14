@@ -335,6 +335,123 @@ def snap_clip_to_words(start, end, words, video_duration,
     return (round(new_start, 3), round(new_end, 3))
 
 
+# --- Cutting on whole sentences ---------------------------------------------------
+
+_SENTENCE_END = r'[.?!…]["\'”’)\]]*$'
+_EDGE = 0.05          # a word counts as inside a clip when it is within this of the bounds
+_HEADROOM = 1.0       # keeps lead + tail padding from tripping the max-duration repair
+_MAX_TAIL_WORDS = 2   # "right?" before a start / "And" after an end is a fragment, not content
+_MAX_TRIM = 1.5
+
+
+def sentence_spans(words, max_span_seconds=30.0):
+    """The sentences of a transcript's word list, for cutting clips on whole sentences.
+
+    ``words`` is the flat ``{'w','s','e'}`` list snap_clip_to_words takes, sorted by
+    start. Returns ``[{"start", "end", "first", "last", "text"}]`` with inclusive
+    word indices. A sentence ends on a word carrying terminal punctuation.
+    Whisper punctuates, but not always: a "sentence" longer than
+    ``max_span_seconds`` is split at its longest pause, so an unpunctuated
+    stretch still has boundaries to cut on.
+    """
+    import re
+
+    end_re = re.compile(_SENTENCE_END)
+    found, first = [], 0
+    for i, w in enumerate(words):
+        if end_re.search(str(w.get("w", "")).strip()):
+            found.append((first, i))
+            first = i + 1
+    if first < len(words):
+        found.append((first, len(words) - 1))
+
+    spans, stack = [], list(reversed(found))
+    while stack:
+        a, b = stack.pop()
+        if b > a and float(words[b]["e"]) - float(words[a]["s"]) > max_span_seconds:
+            cut = max(range(a, b), key=lambda k: float(words[k + 1]["s"]) - float(words[k]["e"]))
+            stack.append((cut + 1, b))
+            stack.append((a, cut))
+            continue
+        spans.append({"start": float(words[a]["s"]), "end": float(words[b]["e"]),
+                      "first": a, "last": b,
+                      "text": " ".join(str(words[k]["w"]).strip() for k in range(a, b + 1))})
+    return spans
+
+
+def snap_clip_to_sentences(start, end, words, video_duration, min_duration=15.0,
+                           max_duration=60.0, max_shift=8.0, spans=None):
+    """Cut a clip on whole sentences: never mid-statement, never on the first
+    word of the next one.
+
+    Measured 15-sep-2026 on 73 clips from saved runs: 17 (23%) ended on a
+    finished sentence. Pass 2 closes on a Whisper line and 44-57% of those end
+    mid-sentence; then snap_clip_to_words, which takes the NEAREST word end,
+    added the next sentence's first word to 20 clips whose end had been right:
+    the model ends on the next line's start, and when the pause before a new
+    sentence (0.54 s) is longer than its first word ("And", 0.36 s), that word's
+    end is the nearest.
+
+    END: a clip that closes on a finished sentence keeps it; one that closes on
+    the first word or two of a new sentence is cut back to the sentence before;
+    one that closes mid-sentence finishes it if that takes at most
+    ``max_shift`` s, else the nearest sentence end that keeps the length legal.
+    START: moves earlier to the start of the sentence it opened in (at most
+    ``max_shift`` s) or drops a tail of at most two words of the previous one;
+    it never moves later than that, so the opening the model chose stays.
+    Both are then padded into silence by snap_clip_to_words. With no sentence
+    boundary that fits the band, the result is plain snap_clip_to_words.
+    """
+    start, end = float(start), float(end)
+    word_snapped = snap_clip_to_words(start, end, words, video_duration,
+                                      min_duration=min_duration, max_duration=max_duration)
+    if not words:
+        return word_snapped
+    spans = sentence_spans(words) if spans is None else spans
+    inside = [k for k, w in enumerate(words)
+              if float(w["s"]) >= start - _EDGE and float(w["e"]) <= end + _EDGE]
+    if not spans or not inside:
+        return word_snapped
+    owner = [0] * len(words)
+    for n, span in enumerate(spans):
+        for k in range(span["first"], span["last"] + 1):
+            owner[k] = n
+
+    first_k = inside[0]
+    opening = spans[owner[first_k]]
+    new_start = word_snapped[0]
+    if first_k == opening["first"]:
+        new_start = opening["start"]
+    elif (opening["last"] - first_k + 1 <= _MAX_TAIL_WORDS and owner[first_k] + 1 < len(spans)
+          and spans[owner[first_k] + 1]["start"] - start <= _MAX_TRIM):
+        new_start = spans[owner[first_k] + 1]["start"]
+    elif start - opening["start"] <= max_shift:
+        new_start = opening["start"]
+
+    def legal(t):
+        return min_duration <= t - new_start <= max_duration - _HEADROOM
+
+    last_k = inside[-1]
+    n = owner[last_k]
+    closing = spans[n]
+    if last_k == closing["last"] and legal(closing["end"]):
+        new_end = closing["end"]
+    elif (last_k - closing["first"] + 1 <= _MAX_TAIL_WORDS and n > 0
+          and end - spans[n - 1]["end"] <= _MAX_TRIM and legal(spans[n - 1]["end"])):
+        new_end = spans[n - 1]["end"]
+    elif closing["end"] - end <= max_shift and legal(closing["end"]):
+        new_end = closing["end"]
+    else:
+        ends = [span["end"] for span in spans if legal(span["end"])]
+        if not ends:
+            return word_snapped
+        new_end = min(ends, key=lambda t: abs(t - end))
+
+    return snap_clip_to_words(new_start, new_end, words, video_duration,
+                              min_duration=min_duration, max_duration=max_duration,
+                              search_window=_EDGE)
+
+
 # --- Creator instructions (steer clip selection) ------------------------------
 
 # ~250 tokens: enough for a real direction, small enough that repeating it in

@@ -96,6 +96,28 @@ text, but fewer clips means less pass-2 output (6x the input price on
 flash-lite), so the job got cheaper: 1.51 -> 1.46 cents. The box is cleared for
 each video on purpose.
 
+**Clips are cut on whole sentences** (15-sep-2026, `clip_selection.
+snap_clip_to_sentences`, replacing plain word snapping in `get_viral_clips`).
+Of 73 saved clip answers only 17 (23%) ended on a finished sentence, and a real
+50-min job ended 4 of 6 clips mid-statement although each sentence finished
+2.4-4.3 s later. Two causes, neither the model's judgement: pass 2 closes on a
+Whisper line and 44-57% of Whisper lines end mid-sentence; and
+`snap_clip_to_words` takes the NEAREST word end, so an end placed on the next
+line's start grabbed that line's first word ("And", "So") whenever the pause
+before it (0.54 s) outlasted the word (0.36 s) — 20 of the 73. The rule: an end
+on a finished sentence stays; one or two words of a new sentence are cut back;
+a mid-sentence end finishes its sentence if that takes ≤ 8 s, else the nearest
+sentence end that keeps the band; a start moves earlier to its sentence start
+(≤ 8 s) or drops a ≤ 2-word tail of the previous one, never later, so the
+chosen opening stays. Sentences come from punctuation; spans over 30 s split at
+their longest pause, because Whisper sometimes leaves punctuation out.
+`tools/compare_selection.py --replay` re-cuts saved raw answers with no API
+calls: finished endings 16% -> 92% on the 55-min records (the 4 others end
+right before a capitalised new sentence Whisper did not punctuate), 38% -> 100%
+on the 10-min slice, 2/6 -> 6/6 on the job; no start moved later, no clip left
+15-60 s. The clip editor and MCP `recut_clip` keep word snapping on purpose:
+their cuts are deliberate.
+
 **The randomness left is in pass 2, not the ranking.** On the 10-min slice both
 runs sent the identical 8 windows to pass 2 and only 3 of 6 final clips
 matched; `_run_gemini_stage` sets no temperature or thinking level (API
@@ -170,7 +192,7 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 | File | Purpose |
 |------|---------|
 | `main.py` | Core video processing: transcription, scene detection, clip extraction, vertical reframing |
-| `clip_selection.py` | Stdlib-only clip-selection helpers: windows, shortlist, creator instructions, model prices |
+| `clip_selection.py` | Stdlib-only clip-selection helpers: windows, shortlist, sentence cuts, creator instructions, Gemini retry policy, model prices |
 | `tools/compare_selection.py` | Harness that measures clip selection on a cached transcript (see "How clips are chosen") |
 | `app.py` | FastAPI server with async job queue and REST endpoints |
 | `editor.py` | Gemini AI integration for dynamic video effects (FFmpeg filter generation) |

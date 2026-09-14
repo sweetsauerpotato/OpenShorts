@@ -27,7 +27,8 @@ import gemini_worker
 import layout_picker
 import llm_provider
 from clip_selection import (build_transcript_windows, clip_count_targets,
-                            clip_duration_bounds, snap_clip_to_words,
+                            clip_duration_bounds, sentence_spans,
+                            snap_clip_to_sentences,
                             trim_to_best, best_window_scores, build_shortlist,
                             normalize_clip_instructions,
                             with_clip_instructions, CLIP_INSTRUCTIONS_MAX_CHARS,
@@ -1776,10 +1777,19 @@ def get_viral_clips(transcript_result, video_duration, instructions=None):
             shorts = trim_to_best(shorts, max_clips)
             print(f"   Kept the {max_clips} best-scoring clip(s) of "
                   f"{max_clips + dropped}.")
-        # Snap each proposed clip onto real word boundaries (+ a bit of silence).
-        for s in shorts:
-            ns, ne = snap_clip_to_words(s.get("start", 0), s.get("end", 0), words, video_duration,
-                                        min_duration=min_secs, max_duration=max_secs)
+        # Cut each proposed clip on whole sentences (+ a bit of silence): the
+        # model's own bounds end mid-sentence or on the next sentence's first
+        # word far more often than not. See snap_clip_to_sentences.
+        spans = sentence_spans(words)
+        for n, s in enumerate(shorts, 1):
+            old = (float(s.get("start", 0)), float(s.get("end", 0)))
+            ns, ne = snap_clip_to_sentences(old[0], old[1], words, video_duration,
+                                            min_duration=min_secs, max_duration=max_secs,
+                                            spans=spans)
+            moved = [f"{name} {new - was:+.1f}s" for name, new, was
+                     in (("start", ns, old[0]), ("end", ne, old[1])) if abs(new - was) > 3]
+            if moved:
+                print(f"   ✂️ Clip {n}: {', '.join(moved)} to cut on whole sentences.")
             s["start"], s["end"] = ns, ne
 
         # Aggregate cost across both passes.

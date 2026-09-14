@@ -234,6 +234,44 @@ def topic_hits(clips, transcript, keywords):
     return sum(hits), len(hits)
 
 
+def transcript_words(transcript):
+    """The flat {'w','s','e'} word list get_viral_clips cuts clips on."""
+    return [{"w": w.get("word", ""), "s": float(w["start"]), "e": float(w["end"])}
+            for seg in transcript.get("segments", []) for w in (seg.get("words") or [])]
+
+
+def cut_quality(clips, words):
+    """(clips ending on a finished sentence, clips starting on a sentence).
+
+    A clip ends on a finished sentence when the last word inside it carries
+    terminal punctuation, and starts on one when the word before it does. Only
+    real punctuation counts, never the pause splits sentence_spans makes in
+    unpunctuated stretches, so the metric cannot flatter the cutter.
+    """
+    from clip_selection import _SENTENCE_END
+    end_re = re.compile(_SENTENCE_END)
+    ends = starts = 0
+    for c in clips:
+        s, e = float(c.get("start", 0)), float(c.get("end", 0))
+        inside = [w for w in words if w["s"] >= s - 0.05 and w["e"] <= e + 0.05]
+        before = [w for w in words if w["e"] <= s + 0.05]
+        ends += bool(inside) and bool(end_re.search(inside[-1]["w"].strip()))
+        starts += (not before) or bool(end_re.search(before[-1]["w"].strip()))
+    return ends, starts
+
+
+def boundary_moves(raw_clips, final_clips):
+    """[(start move, end move)] in seconds, each final clip against its raw answer."""
+    moves = []
+    for f in final_clips:
+        cands = [r for r in raw_clips if r.get("source_window_id") == f.get("source_window_id")]
+        if cands:
+            r = min(cands, key=lambda r: abs(float(r.get("start", 0)) - float(f.get("start", 0))))
+            moves.append((round(float(f["start"]) - float(r["start"]), 2),
+                          round(float(f["end"]) - float(r["end"]), 2)))
+    return moves
+
+
 def run_once(provider, transcript, duration, seed=None, instructions=None, keywords=None):
     import main
     import llm_provider
@@ -331,6 +369,9 @@ def run_once(provider, transcript, duration, seed=None, instructions=None, keywo
     language = str(transcript.get("language") or "")
     foreign = [text for c in final for text in _copy_fields(c)
                if _foreign_script(text, language)]
+    words = transcript_words(transcript)
+    final_ends, final_starts = cut_quality(final, words)
+    raw_ends, _ = cut_quality(raw_clips, words)
 
     return {
         "provider": provider,
@@ -354,6 +395,10 @@ def run_once(provider, transcript, duration, seed=None, instructions=None, keywo
         "raw_clips": raw_clips,
         "band_violations": band_violations,
         "band_bounds": [min_secs, max_secs],
+        "final_ends_on_sentence": final_ends,
+        "final_starts_on_sentence": final_starts,
+        "raw_ends_on_sentence": raw_ends,
+        "boundary_moves": boundary_moves(raw_clips, final),
         "out_of_window": out_of_window,
         "echoed": echoed,
         "windows_scored": len(best_score),
@@ -497,6 +542,17 @@ def report(run):
           f"{run['echoed'][:6]}   <- returns the window instead of choosing")
     print(f"    playbook hooks    : {len(run['playbook_hooks'])} {run['playbook_hooks'][:4]}")
     print(f"    foreign script    : {len(run['foreign_script'])} {run['foreign_script'][:3]}")
+    if run.get("final_ends_on_sentence") is not None:
+        n_final = len(run["final_clips"])
+        print(f"    CLIP ENDINGS      : {run['final_ends_on_sentence']}/{n_final} end on a finished "
+              f"sentence (raw model answers: {run['raw_ends_on_sentence']}/{len(run['raw_clips'])}), "
+              f"{run['final_starts_on_sentence']}/{n_final} start on one")
+        moves = run.get("boundary_moves") or []
+        if moves:
+            s_moves = sorted(abs(m[0]) for m in moves)
+            e_moves = sorted(abs(m[1]) for m in moves)
+            print(f"    cut moved         : start median {statistics.median(s_moves):.1f}s max "
+                  f"{s_moves[-1]:.1f}s | end median {statistics.median(e_moves):.1f}s max {e_moves[-1]:.1f}s")
     print(f"  RANKING")
     print(f"    windows scored    : {run['windows_scored']}/{run['n_windows']}"
           f"   <- unscored windows can never be picked")
@@ -512,12 +568,61 @@ def report(run):
         on, total = run["topic_hits"]
         print(f"  INSTRUCTIONS : {run['instructions']!r}")
         print(f"    on-topic clips    : {on}/{total}   <- transcript inside the clip mentions a keyword")
-    print(f"    final clips       : {len(run['final_clips'])} (after word-snapping)")
+    print(f"    final clips       : {len(run['final_clips'])} (after cutting on sentences)")
     for c in run["final_clips"]:
         d = c.get("end", 0) - c.get("start", 0)
         print(f"      {c.get('start'):.1f}-{c.get('end'):.1f} ({d:.0f}s) "
               f"score={c.get('predicted_score')} hook={c.get('viral_hook_text')!r}")
         print(f"        title: {c.get('video_title_for_youtube_short')!r}")
+
+
+def replay(paths, transcript, duration):
+    """Re-cut saved RAW model answers with the old and the current cutting code.
+
+    No API calls, so a change to how clips are cut is measured for free. Takes
+    harness records (their ``raw_clips``) or a job's metadata.json (its
+    ``shorts``, which are already cut — replaying those shows what the current
+    code would change on that job)."""
+    from clip_selection import sentence_spans, snap_clip_to_sentences, snap_clip_to_words
+
+    words = transcript_words(transcript)
+    spans = sentence_spans(words)
+    rules = {
+        "word snapping (before)": lambda s, e, lo, hi: snap_clip_to_words(
+            s, e, words, duration, min_duration=lo, max_duration=hi),
+        "sentence cuts (now)": lambda s, e, lo, hi: snap_clip_to_sentences(
+            s, e, words, duration, min_duration=lo, max_duration=hi, spans=spans),
+    }
+    answers = []  # (start, end, lo, hi)
+    for path in paths:
+        with open(path, encoding="utf-8") as fh:
+            blob = json.load(fh)
+        if isinstance(blob, dict):
+            answers += [(float(c["start"]), float(c["end"]), 15.0, 60.0) for c in blob.get("shorts", [])]
+        else:
+            for run in blob:
+                lo, hi = run.get("band_bounds") or (15.0, 60.0)
+                answers += [(float(c["start"]), float(c["end"]), float(lo), float(hi))
+                            for c in run.get("raw_clips") or []]
+    n = len(answers)
+    print(f"\nREPLAY: {n} saved clip answer(s) from {len(paths)} file(s), no API calls")
+    print(f"  {'cut rule':<24} {'ends on sentence':>17} {'starts on one':>15} {'start later':>12} "
+          f"{'outside band':>13} {'length':>11} {'moved start/end median (max)':>30}")
+    for label, cut in rules.items():
+        clips, later, outside, s_moves, e_moves = [], 0, 0, [], []
+        for s, e, lo, hi in answers:
+            ns, ne = cut(s, e, lo, hi)
+            clips.append({"start": ns, "end": ne})
+            later += ns - s > 0.3
+            outside += not (lo - 0.01 <= ne - ns <= hi + 0.01)
+            s_moves.append(abs(ns - s))
+            e_moves.append(abs(ne - e))
+        ends, starts = cut_quality(clips, words)
+        lens = [c["end"] - c["start"] for c in clips]
+        print(f"  {label:<24} {ends:>4}/{n} ({100 * ends / n:3.0f}%) {starts:>5}/{n} ({100 * starts / n:3.0f}%) "
+              f"{later:>12} {outside:>13} {min(lens):>5.1f}-{max(lens):<5.1f} "
+              f"{statistics.median(s_moves):>9.1f} ({max(s_moves):.1f}) / "
+              f"{statistics.median(e_moves):.1f} ({max(e_moves):.1f})")
 
 
 def main_cli():
@@ -535,6 +640,9 @@ def main_cli():
     ap.add_argument("--instructions", help="creator clip instructions to steer selection")
     ap.add_argument("--topic-keywords",
                     help="comma separated; reports how many final clips mention one")
+    ap.add_argument("--replay", nargs="+", metavar="RECORD",
+                    help="re-cut the raw answers saved in these records (or a job's "
+                         "metadata.json) with the current cutting code; no API calls")
     args = ap.parse_args()
     from clip_selection import normalize_clip_instructions
     instructions = normalize_clip_instructions(args.instructions)
@@ -557,6 +665,9 @@ def main_cli():
                   for s in transcript.get("segments", []))
     print(f"source: {duration:.0f}s, {len(transcript.get('segments', []))} segments, "
           f"{n_words} words, language={transcript.get('language')}")
+    if args.replay:
+        replay(args.replay, transcript, duration)
+        return
     windows = assert_usable(transcript, duration)
     print(f"        {len(windows)} scoring windows -> "
           f"{-(-len(windows) // 8)} pass-1 call(s) per provider")
