@@ -420,6 +420,29 @@ portrait clip cannot reproduce the shrink either.
   `emphasis_times` is a plain list of seconds so the transcript's hook words can
   replace it without touching the module.
 
+### Edited clips keep their hook
+
+A clip's layers are files: the clean reframe `<title>_clip_N.mp4` (watermark
+burned in), then `hooked_<ts>_` over it, then `subtitled_<ts>_` on top. The
+editor's two rebuilds, re-cut (`/api/clip/rerender`, MCP `recut_clip`) and
+re-frame (`/api/clip/reframe`), start from hook-less files: the clean file or
+the source. Until 15-sep-2026 they burned the captions back on but never the
+hook, so every edit silently dropped it while the metadata still recorded
+`auto_hook`.
+
+`recut.perform_recut(hook=)` now burns the clip's recorded hook
+(`hooks.burn_recorded_hook`) under the captions and copies the layout sidecar
+to the hooked file, so SPLIT captions stay on the seam. `/api/hook` records
+the hook's `size` too, since the burn is redone from that record. Both
+requests take `reapply_hook` (default true). `auto_hook` stays only when the
+served file really carries a hook (`_carries_hook`), and the response's
+`burned_hook` says which hook it has.
+
+Live through `/mcp` (15-sep-2026): a 5-piece fast-path re-cut with the
+punchline first (26.1 s, 69 s to render on CPU) came back as
+`subtitled_…_hooked_…_recut_…`, with the hook over the first 5 s and captions
+under it.
+
 ### Key Classes
 - `SmoothedCameraman` - Stabilized camera movement with safe zone logic (prevents jitter)
 - `SpeakerTracker` - Prevents rapid speaker switching, handles temporary occlusions

@@ -204,6 +204,23 @@ HOOK_STYLES = {
     "outline_yellow": {"box": (0, 0, 0, 0),  "text": (255, 214, 0),   "outline": ((0, 0, 0), 8), "shadow": False},
 }
 
+# The dashboard's hook sizes (/api/hook `size`) as font scales.
+HOOK_SIZES = {"S": 0.8, "M": 1.0, "L": 1.3}
+
+
+def burn_recorded_hook(video_path, hook, output_path):
+    """Burn a clip's recorded hook onto ``video_path``.
+
+    ``hook`` is the clip's metadata ``auto_hook``, which the pipeline's auto
+    hook and /api/hook both write. A clip the editor rebuilds from the clean
+    file or the source (re-cut, re-frame) gets the same overlay back from it.
+    """
+    add_hook_to_video(video_path, hook["text"], output_path,
+                      position=hook.get("position") or "top",
+                      font_scale=HOOK_SIZES.get(hook.get("size"), 1.0),
+                      duration=hook.get("duration_seconds"),
+                      style=hook.get("style") or "classic")
+
 
 def create_hook_image(text, target_width, output_image_path="hook_overlay.png", font_scale=1.0, style="classic"):
     """

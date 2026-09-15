@@ -265,8 +265,8 @@ def _run_ffmpeg(command):
 def perform_recut(*, input_path, segments, output_dir, clean_name,
                   reframe=False, output_format="auto", watermark=False,
                   captions_transcript=None, force_strategy=None,
-                  crop_overrides=None, runner=None, renderer=None,
-                  watermarker=None, captioner=None):
+                  crop_overrides=None, hook=None, runner=None, renderer=None,
+                  watermarker=None, captioner=None, hooker=None):
     """Render a recut clip. Returns (served_filename, clean_filename).
 
     - ``input_path``/``segments``: the file to cut from and the times ON THAT
@@ -283,10 +283,16 @@ def perform_recut(*, input_path, segments, output_dir, clean_name,
       source width, for scenes the user framed by hand. Source path only, for
       the same reason as ``reframe``: the canonical file is already cropped, so
       its framing can no longer be changed.
+    - ``hook``: the clip's recorded hook (metadata ``auto_hook``). Burned onto a
+      ``hooked_<ts>_`` derivative of the recut, under the captions, the layer
+      order the pipeline uses. Both inputs are hook-less (the canonical file
+      and the source), so without this every edit silently dropped the hook.
+      A hook that fails ships the recut without it rather than failing the
+      edit, like auto_hook_clip.
 
-    The renderer/watermarker/captioner hooks default to main.py's
-    implementations, imported lazily so this module stays importable without
-    the ML stack; tests inject fakes.
+    The renderer/watermarker/captioner/hooker defaults are main.py's and
+    hooks.py's implementations, imported lazily so this module stays
+    importable without the ML stack; tests inject fakes.
     """
     # The uuid token keeps two same-second saves of one clip from writing (and
     # then serving) the same filename; the timestamp keeps "newest derived
@@ -325,9 +331,28 @@ def perform_recut(*, input_path, segments, output_dir, clean_name,
             (watermarker or _main_attr("apply_watermark"))(out_path)
 
         served_name = out_name
+        top_path = out_path
+        if hook and str(hook.get("text") or "").strip():
+            hooked_path = os.path.join(output_dir, f"hooked_{int(time.time())}_{out_name}")
+            try:
+                (hooker or _burn_recorded_hook)(out_path, hook, hooked_path)
+                # Captions read the stacked stretches from the file they burn
+                # onto: without the sidecar a SPLIT clip's captions would fall
+                # from the seam to the bottom.
+                import layout_ranges
+                layout_ranges.write(hooked_path, [(r["start"], r["end"], r["layout"])
+                                                  for r in layout_ranges.read(out_path)])
+                top_path, served_name = hooked_path, os.path.basename(hooked_path)
+            except Exception as e:
+                print(f"⚠️ Hook not re-applied to the recut ({type(e).__name__}: {e}); "
+                      f"it ships without it.")
+                for leftover in (hooked_path, hooked_path + ".layout.json"):
+                    if os.path.exists(leftover):
+                        os.remove(leftover)
+
         if captions_transcript and captions_transcript.get("segments"):
             caption = captioner or _main_attr("auto_caption_clip")
-            captioned = caption(out_path, captions_transcript,
+            captioned = caption(top_path, captions_transcript,
                                 0.0, total_duration(segments))
             if captioned:
                 served_name = os.path.basename(captioned)
@@ -340,3 +365,8 @@ def perform_recut(*, input_path, segments, output_dir, clean_name,
 def _main_attr(name):
     import main  # heavy — resolved only when a real render/caption runs
     return getattr(main, name)
+
+
+def _burn_recorded_hook(video_path, hook, output_path):
+    from hooks import burn_recorded_hook  # PIL; only when a hook is burned
+    burn_recorded_hook(video_path, hook, output_path)

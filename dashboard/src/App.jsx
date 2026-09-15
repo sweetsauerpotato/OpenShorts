@@ -400,6 +400,9 @@ function App() {
         start: data.start,
         end: data.end,
         recipe: data.recipe,
+        // The hook the new file carries (the edit burns it back on); null when
+        // it was dropped, so the remounted card stops offering to remove it.
+        ...('burned_hook' in data ? { auto_hook: data.burned_hook } : {}),
       };
       return { ...prev, clips };
     });

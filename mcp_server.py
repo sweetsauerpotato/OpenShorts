@@ -316,7 +316,9 @@ TOOLS = [
             "given order, so you can trim, extend, drop a dead moment in the "
             "middle, or reorder. Segments inside the clip's original range "
             "re-render in seconds; going outside needs the retained source "
-            "video and re-runs the reframe engine."
+            "video and re-runs the reframe engine. The clip's hook text and "
+            "captions are burned back on unless reapply_hook / "
+            "reapply_captions is false."
         ),
         "inputSchema": {
             "type": "object",
@@ -343,6 +345,11 @@ TOOLS = [
                 "reapply_captions": {
                     "type": "boolean",
                     "description": "Burn default captions back on after the recut (default true).",
+                },
+                "reapply_hook": {
+                    "type": "boolean",
+                    "description": "Burn the clip's hook text back on after the recut (default true); "
+                                   "false leaves the recut without a hook.",
                 },
                 "framing": {
                     "type": "string", "enum": ["auto", "full", "track"],
@@ -551,7 +558,7 @@ async def _tool_add_subtitles(client, args):
 async def _tool_recut_clip(client, args):
     body = {"job_id": args["job_id"], "clip_index": args["clip_index"],
             "segments": args["segments"]}
-    for k in ("snap_to_words", "reapply_captions", "framing"):
+    for k in ("snap_to_words", "reapply_captions", "reapply_hook", "framing"):
         if args.get(k) is not None:
             body[k] = args[k]
     resp = await client.post("/api/clip/rerender", json=body)

@@ -534,6 +534,22 @@ def _strip_burned_hook(output_dir, filename):
         filename = m.group(1)
 
 
+def _carries_hook(output_dir, filename):
+    """True when this served file has a burned hook under its captions."""
+    return bool(re.match(r'^(?:hooked_\d+_|hook_)',
+                         _strip_burned_captions(output_dir, filename)))
+
+
+def _record_burned_hook(hooked, clip, mem_clip=None):
+    """``auto_hook`` must describe the file being served: an edit rebuilt
+    without the hook (reapply_hook=false, or the burn failed) drops it, or the
+    editor would keep offering to restyle a hook the clip no longer has."""
+    if not hooked:
+        for record in (clip, mem_clip):
+            if record is not None:
+                record.pop('auto_hook', None)
+
+
 def _reapply_captions(job_id, clip_index, video_path):
     """Re-burn the default captions onto a freshly derived file.
 
@@ -3067,7 +3083,7 @@ async def _ensure_job_files(job_id: str, request: Request) -> bool:
 
 from editor import VideoEditor
 from subtitles import generate_srt, generate_ass, burn_subtitles, generate_srt_from_video
-from hooks import add_hook_to_video
+from hooks import add_hook_to_video, HOOK_SIZES
 from translate import translate_video, get_supported_languages
 from thumbnail import (analyze_video_for_titles, refine_titles, generate_thumbnail,
                        generate_youtube_description, extract_face_frames)
@@ -3460,6 +3476,9 @@ class RerenderRequest(BaseModel):
     segments: List[RerenderSegment]
     snap_to_words: bool = False
     reapply_captions: bool = True
+    # Burn the clip's recorded hook (auto_hook) back on: the recut is rebuilt
+    # from hook-less files. False drops it.
+    reapply_hook: bool = True
     # None = inherit the recipe's framing (so plain trims keep the look);
     # 'auto' resets to the classifier; 'full'/'track' force a layout.
     framing: Optional[str] = None
@@ -3582,6 +3601,8 @@ async def _rerender_locked(req: RerenderRequest, request: Request, job):
     v_transcript = (recut.virtual_transcript(transcript, segments)
                     if req.reapply_captions else None)
 
+    hook = clip.get('auto_hook') if req.reapply_hook else None
+
     def run_recut():
         if fast:
             return recut.perform_recut(
@@ -3589,18 +3610,19 @@ async def _rerender_locked(req: RerenderRequest, request: Request, job):
                 segments=recut.rebase_segments(
                     segments, canonical_range['start'], canonical_range['end']),
                 output_dir=output_dir, clean_name=clean_name,
-                reframe=False, captions_transcript=v_transcript)
+                reframe=False, captions_transcript=v_transcript, hook=hook)
         return recut.perform_recut(
             input_path=source_path, segments=segments,
             output_dir=output_dir, clean_name=clean_name,
             reframe=True, output_format=data.get('output_format', 'auto'),
             watermark=bool(job.get('watermark')),
             force_strategy=force_strategy,
-            captions_transcript=v_transcript)
+            captions_transcript=v_transcript, hook=hook)
 
     try:
         loop = asyncio.get_event_loop()
         served_name, _clean_recut_name = await loop.run_in_executor(None, run_recut)
+        hooked = _carries_hook(output_dir, served_name)
 
         new_video_url = f"/videos/{req.job_id}/{served_name}"
         new_recipe = {"v": 1, "segments": segments,
@@ -3626,12 +3648,14 @@ async def _rerender_locked(req: RerenderRequest, request: Request, job):
         if clip.get('crop_overrides'):
             updates['crop_overrides'] = None
         clip.update(updates)
+        mem_clips = (job.get('result') or {}).get('clips') or []
+        mem_clip = mem_clips[req.clip_index] if req.clip_index < len(mem_clips) else None
+        if mem_clip is not None:
+            mem_clip.update(updates)
+        _record_burned_hook(hooked, clip, mem_clip)
         data['shorts'] = clips
         with open(json_files[0], 'w') as f:
             json.dump(data, f, indent=2)
-        mem_clips = (job.get('result') or {}).get('clips') or []
-        if req.clip_index < len(mem_clips):
-            mem_clips[req.clip_index].update(updates)
 
         _archive_clip_edit_bg(req.job_id, req.clip_index, served_name)
         if reservation_id:
@@ -3645,6 +3669,7 @@ async def _rerender_locked(req: RerenderRequest, request: Request, job):
             "end": new_end,
             "duration": total,
             "render_path": "fast" if fast else "source",
+            "burned_hook": clip.get('auto_hook'),
         }
     except Exception as e:
         if reservation_id:
@@ -3676,6 +3701,7 @@ class ReframeRequest(BaseModel):
     # know the source dimensions.
     crop_overrides: Dict[str, Any]
     reapply_captions: bool = True
+    reapply_hook: bool = True  # as RerenderRequest
 
 
 def _clip_scene_workfile(source_path, segments, output_dir, token):
@@ -3949,6 +3975,8 @@ async def _reframe_locked(req: ReframeRequest, request: Request, job, overrides)
     # "Error opening output ...: File name too long".
     clean_name = f"{base_name}_clip_{req.clip_index + 1}.mp4"
 
+    hook = clip.get('auto_hook') if req.reapply_hook else None
+
     def run():
         return recut.perform_recut(
             input_path=source_path, segments=segments,
@@ -3957,11 +3985,12 @@ async def _reframe_locked(req: ReframeRequest, request: Request, job, overrides)
             watermark=bool(job.get('watermark')),
             force_strategy=force_strategy,
             crop_overrides=overrides,
-            captions_transcript=v_transcript)
+            captions_transcript=v_transcript, hook=hook)
 
     try:
         loop = asyncio.get_event_loop()
         served_name, _clean = await loop.run_in_executor(None, run)
+        hooked = _carries_hook(output_dir, served_name)
 
         new_video_url = f"/videos/{req.job_id}/{served_name}"
         new_recipe = {"v": 1, "segments": segments,
@@ -3975,12 +4004,14 @@ async def _reframe_locked(req: ReframeRequest, request: Request, job, overrides)
             'layout_ranges': layout_ranges.read(os.path.join(output_dir, _clean)),
         }
         clip.update(updates)
+        mem_clips = (job.get('result') or {}).get('clips') or []
+        mem_clip = mem_clips[req.clip_index] if req.clip_index < len(mem_clips) else None
+        if mem_clip is not None:
+            mem_clip.update(updates)
+        _record_burned_hook(hooked, clip, mem_clip)
         data['shorts'] = clips
         with open(json_files[0], 'w') as f:
             json.dump(data, f, indent=2)
-        mem_clips = (job.get('result') or {}).get('clips') or []
-        if req.clip_index < len(mem_clips):
-            mem_clips[req.clip_index].update(updates)
 
         _archive_clip_edit_bg(req.job_id, req.clip_index, served_name)
         if reservation_id:
@@ -3995,6 +4026,7 @@ async def _reframe_locked(req: ReframeRequest, request: Request, job, overrides)
             "start": min(s['start'] for s in segments),
             "end": max(s['end'] for s in segments),
             "framed_scenes": sorted(overrides),
+            "burned_hook": clip.get('auto_hook'),
         }
     except Exception as e:
         if reservation_id:
@@ -4499,8 +4531,7 @@ async def add_hook(req: HookRequest, request: Request):
         output_path = os.path.join(output_dir, output_filename)
 
         # Map Size to Scale
-        size_map = {"S": 0.8, "M": 1.0, "L": 1.3}
-        font_scale = size_map.get(req.size, 1.0)
+        font_scale = HOOK_SIZES.get(req.size, 1.0)
 
         # Meter the FFmpeg overlay re-encode (no-op for BYOK / self-host).
         hook_minutes = _cloud_config.HOOK_MINUTES if BILLING_ENABLED else 0
@@ -4536,9 +4567,11 @@ async def add_hook(req: HookRequest, request: Request):
     if req.remove:
         clip_data.pop('auto_hook', None)
     else:
+        # size too: a re-cut burns the hook again from this record
+        # (hooks.burn_recorded_hook), and without it an L hook came back M.
         clip_data['auto_hook'] = {
             "text": req.text, "style": req.style, "position": req.position,
-            "duration_seconds": req.duration_seconds,
+            "duration_seconds": req.duration_seconds, "size": req.size,
         }
 
     # Update Persistence (Same logic as subtitles)
