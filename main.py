@@ -1844,6 +1844,34 @@ def speech_is_sparse(transcript, duration):
     return words < MIN_SPEECH_WORDS or words / minutes < MIN_SPEECH_WORDS_PER_MIN
 
 
+# --- selection=agent: the job transcribes, an agent chooses the clips ------
+def require_agent_transcript(transcript, duration):
+    """Raise when there is no speech for the agent to choose clips from.
+
+    The AI selection clips such a video from the picture (get_visual_clips),
+    but that is a Gemini call and a transcribe-only job makes none. Failing
+    names the way out; completing would leave a job nobody can clip.
+    """
+    if transcript is None or speech_is_sparse(transcript, duration):
+        raise RuntimeError(
+            "This video has no usable speech, so there is no transcript to choose "
+            "clips from. Run it with AI selection (selection=ai) instead: that clips "
+            "silent video from the picture.")
+
+
+def agent_transcript_metadata(transcript, input_video, output_format, duration):
+    """What a transcribe-only job leaves: the transcript, the source and no clips."""
+    return {
+        "shorts": [],
+        "awaiting_clips": True,
+        "selection": "agent",
+        "transcript": transcript,
+        "source_video": os.path.basename(input_video),
+        "output_format": output_format,
+        "duration": round(float(duration), 3),
+    }
+
+
 def get_visual_clips(video_path, video_duration, language="en", instructions=None):
     """Clip a SILENT video by vision: Gemini watches the footage and picks the
     most engaging visual moments (no transcript). Returns the same
@@ -1951,8 +1979,14 @@ if __name__ == '__main__':
     parser.add_argument('--instructions-file', type=str,
                         help="UTF-8 text file with the creator's clip instructions; steers "
                              "every selection stage.")
+    parser.add_argument('--transcribe-only', action='store_true',
+                        help="Download and transcribe, then stop: the metadata keeps the "
+                             "transcript and no clips, for an agent to choose them "
+                             "(selection=agent). Keeps a downloaded source.")
 
     args = parser.parse_args()
+    if args.transcribe_only and args.skip_analysis:
+        parser.error("--transcribe-only and --skip-analysis cannot be combined")
     output_format = args.format
 
     # Read the instructions BEFORE any download or transcription: the caller
@@ -2017,8 +2051,9 @@ if __name__ == '__main__':
     # Layout choice is per SOURCE video, not per clip: one upload and one call
     # instead of one per clip, and the answer is a property of the material
     # ("this is a screencast"), which does not change between its own clips.
-    # It runs before any render so the modules are switched on in time.
-    if layout_picker.ENABLED:
+    # It runs before any render so the modules are switched on in time. A
+    # transcribe-only job renders nothing; the render job picks for itself.
+    if layout_picker.ENABLED and not args.transcribe_only:
         try:
             _cap = cv2.VideoCapture(input_video)
             _fps = _cap.get(cv2.CAP_PROP_FPS) or 30.0
@@ -2086,6 +2121,9 @@ if __name__ == '__main__':
             except NoAudioError as e:
                 print(f"🔇 {e} — switching to visual analysis.")
 
+        if args.transcribe_only:
+            require_agent_transcript(transcript, duration)
+
         # Music-only or wordless footage transcribes to a handful of words.
         # Clip it by what is on screen instead, like a video with no audio.
         if transcript is not None and speech_is_sparse(transcript, duration):
@@ -2094,13 +2132,26 @@ if __name__ == '__main__':
                   f"switching to visual analysis.")
             transcript = None
 
-        # 4. Gemini Analysis (transcript-driven, or vision for silent videos)
-        if transcript is not None:
+        # 4. Gemini Analysis (transcript-driven, or vision for silent videos).
+        # A transcribe-only job stops here with the transcript saved: the agent
+        # reads it, and a separate render job renders the clips it sends.
+        clips_data = None
+        if args.transcribe_only:
+            metadata_file = os.path.join(output_dir, f"{video_title}_metadata.json")
+            with open(metadata_file, 'w') as f:
+                json.dump(agent_transcript_metadata(
+                    transcript, input_video, output_format, duration), f, indent=2)
+            n_words = sum(len((sg.get('text') or '').split()) for sg in transcript['segments'])
+            print(f"📝 Transcript ready: {n_words} words over {duration / 60:.1f} min. "
+                  f"No clips chosen: the agent chooses them (selection=agent).")
+        elif transcript is not None:
             clips_data = get_viral_clips(transcript, duration, instructions=clip_instructions)
         else:
             clips_data = get_visual_clips(input_video, duration, instructions=clip_instructions)
 
-        if not clips_data or 'shorts' not in clips_data:
+        if args.transcribe_only:
+            pass
+        elif not clips_data or 'shorts' not in clips_data:
             # Deliberately fail instead of reframing the whole video: that path
             # wrote no metadata.json, so app.py marked the job failed anyway
             # (app.py:1087) after burning GPU on a render nobody could see.
@@ -2205,8 +2256,10 @@ if __name__ == '__main__':
                 with open(metadata_file, 'w') as f:
                     json.dump(clips_data, f, indent=2)
 
-    # Clean up original if requested
-    if args.url and not args.keep_original and os.path.exists(input_video):
+    # Clean up original if requested (never after transcribe-only: the agent's
+    # clips are cut from it later)
+    if (args.url and not args.keep_original and not args.transcribe_only
+            and os.path.exists(input_video)):
         os.remove(input_video)
         print(f"🗑️  Cleaned up downloaded video.")
     # The job finished: a later run in this directory must transcribe afresh.

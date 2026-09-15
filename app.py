@@ -572,6 +572,18 @@ def _reapply_captions(job_id, clip_index, video_path):
         return None
 
 
+def _job_result(data, clips):
+    """A finished job's result, from its metadata file.
+
+    ``awaiting_clips`` marks a transcribe-only job (selection=agent): it
+    completed with no clips on purpose, because the agent sends them next.
+    """
+    result = {'clips': clips, 'cost_analysis': data.get('cost_analysis')}
+    if data.get('awaiting_clips'):
+        result['awaiting_clips'] = True
+    return result
+
+
 def _recover_jobs_from_disk():
     """Rebuild completed jobs from OUTPUT_DIR after a restart (issue #46 / #18).
 
@@ -613,7 +625,7 @@ def _recover_jobs_from_disk():
                 'logs': ["♻️ Job recovered from disk after server restart."],
                 'output_dir': job_path,
                 'user_id': owner,
-                'result': {'clips': clips, 'cost_analysis': data.get('cost_analysis')},
+                'result': _job_result(data, clips),
             }
             recovered += 1
         except Exception as e:
@@ -1489,6 +1501,8 @@ async def _notify_job_webhook(job_id):
     }
     if not completed:
         payload["error"] = _job_error_text(job.get('logs', []))[-500:]
+    elif (job.get('result') or {}).get('awaiting_clips'):
+        payload["awaiting_clips"] = True
     body = json.dumps(payload).encode()
     asyncio.create_task(_deliver_webhook(url, body, job.get('webhook_secret')))
 
@@ -1859,13 +1873,12 @@ async def run_job(job_id, job_data):
                 # Enhance result with video URLs
                 base_name = os.path.basename(target_json).replace('_metadata.json', '')
                 clips = data.get('shorts', [])
-                cost_analysis = data.get('cost_analysis')
 
                 for i, clip in enumerate(clips):
                      clip_filename = _canonical_clip_file(output_dir, base_name, i)
                      clip['video_url'] = f"/videos/{job_id}/{clip_filename}"
-                
-                jobs[job_id]['result'] = {'clips': clips, 'cost_analysis': cost_analysis}
+
+                jobs[job_id]['result'] = _job_result(data, clips)
             else:
                  jobs[job_id]['status'] = 'failed'
                  jobs[job_id]['logs'].append("No metadata file generated.")
@@ -2121,6 +2134,10 @@ def layout_env(requested):
     return env
 
 
+# Written into a selection=agent job's directory at submit (see process_endpoint).
+AGENT_JOB_FILE = "agent_job.json"
+
+
 @app.post("/api/process")
 async def process_endpoint(
     request: Request,
@@ -2142,10 +2159,9 @@ async def process_endpoint(
     upload_id: Optional[str] = Form(None),
     quality: Optional[str] = Form(None),
     clip_instructions: Optional[str] = Form(None),
+    selection: Optional[str] = Form(None),
 ):
     api_key = await resolve_gemini(request)
-    if not api_key and not await llm_available_without_key():
-        raise gemini_missing_error()
 
     ack_flag = str(acknowledged).lower() in ("1", "true", "yes")
     force_low = str(force_low_quality).lower() in ("1", "true", "yes")
@@ -2171,6 +2187,26 @@ async def process_endpoint(
         upload_id = body.get("upload_id")
         quality = body.get("quality")
         clip_instructions = body.get("clip_instructions")
+        selection = body.get("selection")
+
+    # Who chooses the clips. "ai" (default) is the Gemini/Ollama selection.
+    # "agent": the job only downloads and transcribes, and the agent (e.g.
+    # Claude over MCP) reads the transcript and sends its own clips afterwards,
+    # so no model call happens and no key is needed.
+    selection = str(selection or "ai").strip().lower()
+    if selection not in ("ai", "agent"):
+        raise HTTPException(status_code=400, detail="selection must be 'ai' or 'agent'")
+    if selection == "ai" and not api_key and not await llm_available_without_key():
+        raise gemini_missing_error()
+    if selection == "agent":
+        steering = [name for name, raw in (("target_clips", target_clips),
+                                           ("clip_min_seconds", clip_min_seconds),
+                                           ("clip_max_seconds", clip_max_seconds))
+                    if raw not in (None, "")]
+        if steering:
+            raise HTTPException(status_code=400, detail=(
+                f"{', '.join(steering)} steer the AI selection; with selection=agent "
+                "the agent decides how many clips and how long"))
 
     # Normalize output format (auto = keep pipeline default).
     if output_format not in ("vertical", "horizontal", "square"):
@@ -2455,6 +2491,23 @@ async def process_endpoint(
             fh.write(instructions)
         cmd.extend(["--instructions-file", instructions_path])
         print(f"[instructions] job={job_id} chars={len(instructions)}")
+
+    if selection == "agent":
+        cmd.append("--transcribe-only")
+        # What the caller asked the clips to look like, for the render job the
+        # agent's clips start later: it inherits these from disk, so the agent
+        # never repeats them and a restart in between loses nothing.
+        from hooks import HOOK_STYLES
+        with open(os.path.join(job_output_dir, AGENT_JOB_FILE), "w", encoding="utf-8") as fh:
+            json.dump({"selection": "agent", "render": {
+                "output_format": output_format,
+                "layouts": [str(name).strip() for name in layouts],
+                "auto_hook": str(auto_hook).lower() in ("1", "true", "yes"),
+                "auto_hook_style": auto_hook_style if auto_hook_style in HOOK_STYLES else None,
+                "captions": not (captions is not None
+                                 and str(captions).lower() in ("0", "false", "no")),
+            }}, fh, indent=2)
+        print(f"[selection] job={job_id} agent: transcribe only")
 
     print(f"[attestation] job={job_id} ip={attestation['ip']} source={attestation['source']} ack=true")
 

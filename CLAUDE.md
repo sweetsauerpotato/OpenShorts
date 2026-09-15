@@ -428,6 +428,24 @@ portrait clip cannot reproduce the shrink either.
   Fired once per job from `run_job_wrapper` after the R2 archive so the payload
   can carry durable download links; survives redeploys via the resume manifest.
   `PUBLIC_API_URL` env sets the absolute-URL base when behind a proxy.
+- **Agent selection** (`selection=agent` on `/api/process` and MCP
+  `process_video`, 15-sep-2026): the agent, not Gemini, chooses the clips.
+  The job downloads and transcribes, then stops (`main.py --transcribe-only`):
+  metadata with `shorts: []`, `awaiting_clips: true`, the transcript and the
+  source (a downloaded one is always kept). No layout pick and no model call,
+  so no Gemini key is needed. A video without usable speech fails and names
+  `selection=ai`, whose silent-video path is a Gemini call. `target_clips` and
+  the clip length band are 400s (the agent decides); instructions are kept.
+  What the clips should look like (format, layouts, hook, hook style,
+  captions) goes to `<job>/agent_job.json`, for the render job the agent's
+  clips start. `awaiting_clips` rides the job result (also when recovered
+  after a restart), the webhook payload and MCP `get_job_status`, and
+  `list_clips` refuses such a job instead of answering "0 clips". Measured
+  through `/mcp`: a 3.1-min upload reached `awaiting_clips` 93 s after submit
+  (64 s transcribing on CPU, no model call); a 60 s tone failed with that
+  message. Self-host gap: `create_upload` hands out an `upload_url` on
+  `http://openshorts.internal` (the MCP tools' in-process base) unless
+  `PUBLIC_API_URL` is set; PUT to `http://localhost:8000/api/uploads/<id>`.
 
 ### Account erasure (GDPR art. 17)
 

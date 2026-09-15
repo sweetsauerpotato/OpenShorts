@@ -156,6 +156,16 @@ TOOLS = [
                                    "fewer clips come back when few moments fit. Cannot change clip "
                                    "length rules.",
                 },
+                "selection": {
+                    "type": "string", "enum": ["ai", "agent"],
+                    "description": "Who chooses the clips. 'ai' (default): OpenShorts picks and renders "
+                                   "them. 'agent': OpenShorts only downloads and transcribes; when "
+                                   "get_job_status reports awaiting_clips, read the transcript with "
+                                   "get_transcript, choose the clips yourself and send them with "
+                                   "render_clips. target_clips and the clip length options do not "
+                                   "apply; auto_hook, hook_style, captions, layouts and output_format "
+                                   "are kept for that render.",
+                },
                 "quality": {
                     "type": "integer", "enum": [360, 480, 720, 1080, 1440, 2160],
                     "description": "source_url only: download up to this resolution (pixels tall). "
@@ -373,7 +383,7 @@ async def _tool_process_video(client, args):
         "webhook_secret": args.get("webhook_secret"),
     }
     for k in ("target_clips", "clip_min_seconds", "clip_max_seconds", "captions", "quality",
-              "clip_instructions"):
+              "clip_instructions", "selection"):
         if args.get(k) is not None:
             body[k] = args[k]
     # Same default as the dashboard: hook on unless the caller opts out. The
@@ -390,6 +400,11 @@ async def _tool_process_video(client, args):
     if data.get("needs_confirmation"):
         data["hint"] = ("Source resolution is below the quality gate. Ask the "
                         "user, then retry with force_low_quality=true to proceed.")
+        return data, False
+    if body.get("selection") == "agent":
+        data["hint"] = ("Downloading and transcribing only; this takes minutes. Poll "
+                        "get_job_status every 30-60s until it reports awaiting_clips, then "
+                        "call get_transcript.")
         return data, False
     data["hint"] = ("Processing takes minutes. Poll get_job_status every 30-60s"
                     + ("" if body["webhook_url"] else " (or re-run with webhook_url for a callback)") + ".")
@@ -411,7 +426,13 @@ async def _tool_get_job_status(client, args):
     out = {"job_id": args["job_id"], "status": data.get("status"),
            "recent_logs": (data.get("logs") or [])[-_LOG_TAIL:]}
     if data.get("status") == "completed":
-        out["clips"] = _clip_summaries(args["job_id"], data.get("result") or {})
+        result = data.get("result") or {}
+        if result.get("awaiting_clips"):
+            out["awaiting_clips"] = True
+            out["hint"] = ("Transcribed, no clips yet (selection=agent): call get_transcript, "
+                           "choose the clips, then send them with render_clips.")
+        else:
+            out["clips"] = _clip_summaries(args["job_id"], result)
     return out, data.get("status") == "failed"
 
 
@@ -441,6 +462,10 @@ async def _tool_list_clips(client, args):
     if out.get("status") != "completed":
         return {"error": f"Job is {out.get('status')}, clips are not ready yet.",
                 "status": out.get("status")}, True
+    if out.get("awaiting_clips"):
+        return {"error": "This job only transcribed (selection=agent), so it has no clips yet: "
+                         "call get_transcript, choose the clips, then send them with "
+                         "render_clips.", "awaiting_clips": True}, True
     return {"job_id": args["job_id"], "clips": out.get("clips") or []}, False
 
 
