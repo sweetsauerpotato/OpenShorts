@@ -31,7 +31,7 @@ from s3_uploader import upload_job_artifacts, list_all_clips, upload_actor_to_s3
 import recut
 import layout_ranges
 import llm_provider
-from clip_selection import normalize_clip_instructions, CLIP_INSTRUCTIONS_MAX_CHARS
+from clip_selection import normalize_clip_instructions, sentence_spans, CLIP_INSTRUCTIONS_MAX_CHARS
 from transcript_import import parse_transcript, transcript_misfit, TranscriptFormatError
 
 load_dotenv()
@@ -2655,6 +2655,107 @@ async def get_status(job_id: str, request: Request):
         "logs": _visible_logs(job['logs']),
         "result": job.get('result')
     }
+
+
+# --- The transcript, for an agent choosing clips (MCP get_transcript) ---------
+# One page of sentences stays near 15k tokens: a 50-min talk (57k characters)
+# fits in one, and a long podcast pages instead of overflowing an MCP client's
+# output limit (Claude Code's default is 25k tokens).
+TRANSCRIPT_PAGE_CHARS = 60_000
+TRANSCRIPT_WORDS_MAX_SECONDS = 300.0
+# What the agent follows when it picks: plain instructions the user edits.
+CLIP_RULES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "clip_rules.md")
+
+
+def _read_text(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read().strip() or None
+    except OSError:
+        return None
+
+
+@app.get("/api/transcript/{job_id}")
+async def get_job_transcript(job_id: str, request: Request, start: Optional[float] = None,
+                             end: Optional[float] = None, words: bool = False):
+    """A job's transcript, for an agent that chooses the clips itself.
+
+    Sentences as ``[start-end] text`` (the lines Gemini's pass 2 reads) in
+    pages of TRANSCRIPT_PAGE_CHARS; the first page also carries the picking
+    rules and the creator's instructions. ``words=true`` returns one stretch
+    (at most TRANSCRIPT_WORDS_MAX_SECONDS) word by word, for exact cuts.
+    Any job with a transcript works, not only selection=agent ones.
+    """
+    await _ensure_job_files(job_id, request)
+    job = jobs.get(job_id) or _job_view_from_disk(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    await _assert_job_owner(request, job)
+
+    job_dir = os.path.join(OUTPUT_DIR, job_id)
+    meta_files = glob.glob(os.path.join(job_dir, "*_metadata.json"))
+    if not meta_files:
+        raise HTTPException(status_code=409, detail=(
+            f"No transcript yet: the job is {_presented_status(job_id, job)}. "
+            "Poll get_job_status until it completes."))
+    with open(meta_files[0], encoding="utf-8") as fh:
+        data = json.load(fh)
+    transcript = data.get("transcript") or {}
+    word_list = recut.transcript_words(transcript)
+    if not word_list:
+        raise HTTPException(status_code=409, detail="This job's video has no transcribed speech.")
+
+    duration = float(data.get("duration") or max(w["e"] for w in word_list))
+    lo = max(0.0, float(start or 0.0))
+    hi = float(end) if end is not None else duration + 1.0
+    if hi <= lo:
+        raise HTTPException(status_code=400, detail="end must be after start")
+
+    title = os.path.basename(meta_files[0])[:-len("_metadata.json")]
+    if title.startswith(f"{job_id}_"):
+        title = title[len(job_id) + 1:]
+    result = {
+        "job_id": job_id,
+        "title": title.replace("_", " "),
+        "duration": round(duration, 1),
+        "language": transcript.get("language"),
+        # "estimated": a pasted transcript's times, fine for choosing; the
+        # render transcribes the chosen clips and cuts on exact words.
+        "timing": "estimated" if transcript.get("origin") == "pasted" else "exact",
+        "awaiting_clips": bool(data.get("awaiting_clips")),
+    }
+    if transcript.get("exact_ranges"):
+        result["exact_ranges"] = transcript["exact_ranges"]
+
+    if words:
+        if start is None or end is None:
+            raise HTTPException(status_code=400, detail="words=true needs start and end")
+        if hi - lo > TRANSCRIPT_WORDS_MAX_SECONDS:
+            raise HTTPException(status_code=400, detail=(
+                f"words=true reads at most {TRANSCRIPT_WORDS_MAX_SECONDS:.0f} s at a time"))
+        result.update(start=lo, end=hi, format="[start, end, word], seconds in the source video",
+                      words=[[round(w["s"], 2), round(w["e"], 2), w["w"]]
+                             for w in word_list if lo <= w["s"] < hi])
+        return result
+
+    spans = sentence_spans(word_list)
+    lines, used, next_start = [], 0, None
+    for span in spans:
+        if span["start"] < lo - 0.001 or span["start"] >= hi:
+            continue
+        line = f"[{span['start']:.1f}-{span['end']:.1f}] {span['text']}"
+        if lines and used + len(line) + 1 > TRANSCRIPT_PAGE_CHARS:
+            next_start = round(span["start"], 3)
+            break
+        lines.append(line)
+        used += len(line) + 1
+    if start is None:
+        result["rules"] = _read_text(CLIP_RULES_PATH)
+        result["instructions"] = _read_text(os.path.join(job_dir, "clip_instructions.txt"))
+    result.update(format="[start-end] sentence, seconds in the source video",
+                  sentences=lines, next_start=next_start,
+                  stats={"sentences": len(spans), "words": len(word_list)})
+    return result
 
 
 def _locate_source(job_id: str):

@@ -489,6 +489,25 @@ portrait clip cannot reproduce the shrink either.
   message. Self-host gap: `create_upload` hands out an `upload_url` on
   `http://openshorts.internal` (the MCP tools' in-process base) unless
   `PUBLIC_API_URL` is set; PUT to `http://localhost:8000/api/uploads/<id>`.
+- **get_transcript** (`GET /api/transcript/{job_id}` and MCP, 15-sep-2026):
+  the agent's view of a job's transcript, for any finished job.
+  - Sentences come as `[start-end] text`, the same lines pass 2 reads, in pages
+    of 60,000 characters of lines (`next_start` points to the next page).
+  - The first page adds `rules` and the job's `instructions`. The rules are
+    `clip_rules.md`, which the user edits; it is read on every call, and
+    `.dockerignore` re-includes it past `*.md`.
+  - `words=true` returns one stretch of at most 300 s as `[start, end, word]`,
+    for exact cuts.
+  - `timing: "estimated"` marks a pasted transcript.
+
+  Measured through `/mcp`: the 50-min democracy job is one page of 63,798
+  characters (~16k tokens at 4 characters per token, under Claude Code's
+  default 25k output limit), 624 sentences, returned in 0.15 s. The 23.6-min
+  Jake Paul job is 25,902 characters; 60 s word by word is 5,375.
+
+  Two things about Claude Code as the client: it gives the model a tool result
+  once (not both `content` and `structuredContent`), and it keeps the tool list
+  from session start, so new tools and fields need an MCP reconnect.
 
 ### Account erasure (GDPR art. 17)
 

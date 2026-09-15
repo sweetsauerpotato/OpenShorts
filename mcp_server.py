@@ -245,6 +245,35 @@ TOOLS = [
         },
     },
     {
+        "name": "get_transcript",
+        "title": "Read a job's transcript to choose clips",
+        "description": (
+            "The transcript of a job's video, to choose the clips yourself: after "
+            "process_video with selection='agent' reports awaiting_clips (any finished "
+            "job works). With only job_id: every sentence as '[start-end] text' in "
+            "seconds of the source video, plus the clip picking rules and the "
+            "creator's instructions to follow. Long videos come in pages: call again "
+            "with start=next_start until next_start is null. With start, end and "
+            "words=true (at most 300 s apart): that stretch word by word as "
+            "[start, end, word], to place exact cuts, drop filler or pauses, or lift "
+            "a punchline to the front. timing='estimated' means the times come from "
+            "a pasted transcript: good enough to choose; the render transcribes the "
+            "chosen clips and cuts on exact words."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "job_id": {"type": "string"},
+                "start": {"type": "number",
+                          "description": "Seconds: begin here (a page's next_start, or a stretch to read word by word)."},
+                "end": {"type": "number", "description": "Seconds: stop here."},
+                "words": {"type": "boolean",
+                          "description": "Word by word instead of sentences; needs start and end, at most 300 s apart."},
+            },
+            "required": ["job_id"],
+        },
+    },
+    {
         "name": "get_quota",
         "title": "Get plan and remaining minutes",
         "description": (
@@ -480,6 +509,16 @@ async def _tool_list_clips(client, args):
     return {"job_id": args["job_id"], "clips": out.get("clips") or []}, False
 
 
+async def _tool_get_transcript(client, args):
+    params = {k: args[k] for k in ("start", "end") if args.get(k) is not None}
+    if args.get("words"):
+        params["words"] = "true"
+    resp = await client.get(f"/api/transcript/{args['job_id']}", params=params)
+    if resp.status_code >= 400:
+        return _api_error(resp), True
+    return resp.json(), False
+
+
 async def _tool_get_quota(client, args):
     resp = await client.get("/api/me")
     # 401: anonymous. 404: self-host, where /api/me isn't even mounted (the
@@ -538,6 +577,7 @@ _TOOL_IMPLS = {
     "create_upload": _tool_create_upload,
     "get_job_status": _tool_get_job_status,
     "list_clips": _tool_list_clips,
+    "get_transcript": _tool_get_transcript,
     "get_quota": _tool_get_quota,
     "add_subtitles": _tool_add_subtitles,
     "recut_clip": _tool_recut_clip,

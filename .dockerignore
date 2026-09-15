@@ -55,6 +55,8 @@ docker-compose.yml
 # Docs
 README.md
 *.md
+# ...but not the agent's clip picking rules: /api/transcript serves them.
+!clip_rules.md
 
 
 
