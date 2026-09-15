@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+**`status.md` is the running log of recent work**: what changed, when, why, and
+what it measured, newest first, plus what is left to do. Read it at the start of
+a session and add an entry per commit.
+
 ## Project Overview
 
 OpenShorts is an AI-powered vertical video generator that transforms long YouTube videos or local uploads into viral-ready short clips (9:16 format) for TikTok, Instagram Reels, and YouTube Shorts. Viral moment detection and title generation run on Google Gemini 3.1 Flash-Lite (`gemini-3.1-flash-lite`, overridable with `GEMINI_MODEL`) **or on a local Ollama** — see "Clip-selection provider" below.
