@@ -350,7 +350,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
                                     {transcript.length.toLocaleString()}/{TRANSCRIPT_MAX.toLocaleString()}
                                 </span>
                             </div>
-                            <label className="btn-quiet !px-2.5 !py-1 !text-xs mt-2 inline-flex cursor-pointer">
+                            <label className="btn-quiet !px-2.5 !py-1 !text-xs mt-2 flex w-fit cursor-pointer">
                                 load a caption file
                                 <input
                                     type="file"
