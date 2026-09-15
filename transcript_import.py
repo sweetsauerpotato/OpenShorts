@@ -25,6 +25,7 @@ instead of a job that fails minutes later) and CI imports it without the ML
 stack.
 """
 
+import html
 import json
 import re
 
@@ -60,9 +61,10 @@ _UNIT = r"(?:seconds?|minutes?|hours?|segundos?|minutos?|horas?)"
 _A11Y = re.compile(rf"^\d+\s+{_UNIT}(?:,?\s+(?:and\s+|y\s+)?\d+\s+{_UNIT})*$", re.I)
 _WORD_TIME = re.compile(r"<((?:\d{2}:)?\d{2}:\d{2}\.\d{3})>")
 _MARKUP = re.compile(r"</?[a-zA-Z][^>]*>|\{\\[^}]*\}")
-# Sound tags are not speech: kept in the line text, never turned into words
-# (a caption would otherwise burn "[MUSIC]").
-_SOUND_TAG = re.compile(r"\[[^\]]*\]|♪+")
+# Not speech: kept in the line text, never turned into words (a caption would
+# otherwise burn "[MUSIC]"). YouTube's auto-captions mark a new speaker with
+# ">>" and a bleeped word with "[ __ ]": a real 23-min paste had 288 and 44.
+_SOUND_TAG = re.compile(r"\[[^\]]*\]|♪+|>>+")
 _VTT_LANGUAGE = re.compile(r"^\s*Language:\s*([A-Za-z]{2,3})\b")
 
 
@@ -191,6 +193,88 @@ def merge_exact_words(transcript, exact_segments, ranges):
         [tuple(r) for r in (transcript or {}).get("exact_ranges") or []] + list(ranges),
         None, pad=0.0)]
     return merged
+
+
+def map_to_exact(t, estimated_words, exact_words, prefer=None):
+    """Where time ``t`` on a pasted transcript's estimated words falls on exact ones.
+
+    Both are {'w','s','e'} word lists. They are aligned by their text, and
+    ``t`` is interpolated between the nearest matched words on either side,
+    so an edge chosen "after the word X" lands after the real X even when the
+    estimate was seconds off (YouTube's panel lines ran ~20 s on a real paste,
+    and each word's time inside them is a guess). None when nothing matches.
+
+    ``prefer`` settles the tie where one word ends exactly where the next
+    begins, which is most of a transcript: "end" keeps the earlier time (stay
+    with the word before the edge), "start" the later one (go with the word
+    after it). Without it, a clip's end jumped onto the next word.
+    """
+    import difflib
+
+    def norm(w):
+        return re.sub(r"[^\w]", "", str(w.get("w", "")).lower())
+
+    est = [w for w in estimated_words if norm(w)]
+    exa = [w for w in exact_words if norm(w)]
+    matcher = difflib.SequenceMatcher(None, [norm(w) for w in est], [norm(w) for w in exa],
+                                      autojunk=False)
+    anchors = []
+    for a, b, size in matcher.get_matching_blocks():
+        for k in range(size):
+            anchors.append((float(est[a + k]["s"]), float(exa[b + k]["s"])))
+            anchors.append((float(est[a + k]["e"]), float(exa[b + k]["e"])))
+    if not anchors:
+        return None
+    anchors.sort()
+    # A slip in the alignment must never fold time back on itself.
+    steady = []
+    for est_t, exact_t in anchors:
+        if not steady or exact_t >= steady[-1][1]:
+            steady.append((est_t, exact_t))
+    t = float(t)
+    before = [p for p in steady if p[0] <= t]
+    after = [p for p in steady if p[0] > t]
+
+    def pick(group, at_end):
+        """Of the anchors sharing one estimated time, the one this edge wants."""
+        tied = [p for p in group if p[0] == (group[-1][0] if at_end else group[0][0])]
+        if prefer in ("end", "start"):
+            return tied[0] if prefer == "end" else tied[-1]
+        return tied[-1] if at_end else tied[0]
+
+    if before and after:
+        (e0, x0), (e1, x1) = pick(before, True), pick(after, False)
+        if e1 <= e0:
+            return x0
+        return x0 + (t - e0) * (x1 - x0) / (e1 - e0)
+    e0, x0 = pick(before, True) if before else pick(after, False)
+    return x0 + (t - e0)
+
+
+def line_span(transcript, t):
+    """The stretch the pasted line holding ``t`` really covers: from its
+    timestamp to the next line's. The line times are reliable (a real YouTube
+    paste: median 0.26 s from Whisper's, never 2 s off); where a word sits
+    inside a 20 s line is only an estimate, so the word can be anywhere in it."""
+    segments = (transcript or {}).get("segments") or []
+    t = float(t)
+    for i, seg in enumerate(segments):
+        start, end = float(seg["start"]), float(seg["end"])
+        reach = max(end, float(segments[i + 1]["start"])) if i + 1 < len(segments) else end
+        if start <= t < reach:
+            return start, reach
+    return t, t
+
+
+def covered(start, end, exact_ranges, video_duration=None, margin=1.0):
+    """True when [start, end] lies inside one exact range with ``margin`` to
+    spare on each side (none needed where the range meets the video's edge)."""
+    for lo, hi in exact_ranges or []:
+        lo_ok = start - lo >= margin or lo <= 0.0
+        hi_ok = hi - end >= margin or (video_duration is not None and hi >= video_duration - 0.05)
+        if lo <= start and end <= hi and lo_ok and hi_ok:
+            return True
+    return False
 
 
 def format_clock(seconds):
@@ -396,7 +480,8 @@ def _seconds(parts):
 
 
 def _clean(line):
-    return " ".join(_MARKUP.sub(" ", line).split())
+    # Caption files escape ">>" and "&" as HTML entities.
+    return " ".join(html.unescape(_MARKUP.sub(" ", line)).split())
 
 
 def _speech_tokens(line):

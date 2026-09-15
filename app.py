@@ -33,6 +33,7 @@ import layout_ranges
 import llm_provider
 from clip_selection import normalize_clip_instructions, sentence_spans, CLIP_INSTRUCTIONS_MAX_CHARS
 from transcript_import import parse_transcript, transcript_misfit, TranscriptFormatError
+from agent_clips import normalize_agent_clips, AgentClipsError
 
 load_dotenv()
 
@@ -2155,6 +2156,41 @@ def layout_env(requested):
 AGENT_JOB_FILE = "agent_job.json"
 
 
+async def _agent_render_source(request, source_job_id):
+    """What a render of chosen clips needs from its source job, or the 4xx
+    that says why it can't: the job, its transcript, its retained video."""
+    job = jobs.get(source_job_id) or _job_view_from_disk(source_job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Source job not found")
+    await _assert_job_owner(request, job)
+    job_dir = os.path.join(OUTPUT_DIR, source_job_id)
+    metas = glob.glob(os.path.join(job_dir, "*_metadata.json"))
+    if not metas:
+        raise HTTPException(status_code=409, detail=(
+            f"The source job has no transcript yet: it is {_presented_status(source_job_id, job)}."))
+    with open(metas[0], encoding="utf-8") as fh:
+        data = json.load(fh)
+    transcript = data.get("transcript") or {}
+    words = recut.transcript_words(transcript)
+    if not words:
+        raise HTTPException(status_code=409, detail="The source job has no transcribed speech.")
+    source = _locate_source(source_job_id)
+    if not source:
+        raise HTTPException(status_code=409, detail=(
+            "The source job's video is no longer on the server (jobs are kept 24 h): "
+            "run process_video again."))
+    duration = float(data.get("duration") or _source_duration_seconds(source)
+                     or max(w["e"] for w in words))
+    try:
+        with open(os.path.join(job_dir, AGENT_JOB_FILE), encoding="utf-8") as fh:
+            render = json.load(fh).get("render") or {}
+    except (OSError, ValueError):
+        render = {}
+    return {"job_id": source_job_id, "source": source, "transcript": transcript,
+            "duration": duration, "render": render,
+            "title": os.path.basename(metas[0])[:-len("_metadata.json")]}
+
+
 def _reject_transcript_misfit(pasted_transcript, video_duration):
     """400 when a pasted transcript runs past the end of the video."""
     misfit = transcript_misfit(pasted_transcript, video_duration) if pasted_transcript else None
@@ -2185,6 +2221,8 @@ async def process_endpoint(
     clip_instructions: Optional[str] = Form(None),
     selection: Optional[str] = Form(None),
     transcript: Optional[str] = Form(None),
+    source_job_id: Optional[str] = Form(None),
+    clips: Optional[str] = Form(None),
 ):
     api_key = await resolve_gemini(request)
 
@@ -2214,6 +2252,8 @@ async def process_endpoint(
         clip_instructions = body.get("clip_instructions")
         selection = body.get("selection")
         transcript = body.get("transcript")
+        source_job_id = body.get("source_job_id")
+        clips = body.get("clips")
 
     # Who chooses the clips. "ai" (default) is the Gemini/Ollama selection.
     # "agent": the job only downloads and transcribes, and the agent (e.g.
@@ -2222,7 +2262,50 @@ async def process_endpoint(
     selection = str(selection or "ai").strip().lower()
     if selection not in ("ai", "agent"):
         raise HTTPException(status_code=400, detail="selection must be 'ai' or 'agent'")
-    if selection == "ai" and not api_key and not await llm_available_without_key():
+
+    # The agent's clips (MCP render_clips): a render job cut from a finished
+    # job's retained video and transcript. Validated in full before any work.
+    render_source = agent_clip_list = None
+    if source_job_id or clips is not None:
+        if not source_job_id or clips is None:
+            raise HTTPException(status_code=400, detail=(
+                "Rendering chosen clips needs both source_job_id and clips"))
+        if url or file or upload_id or thumbnail_session_id:
+            raise HTTPException(status_code=400, detail=(
+                "source_job_id renders clips from that job's video: don't also send "
+                "url, file, upload_id or thumbnail_session_id"))
+        extra = [name for name, raw in (("selection=agent", selection == "agent" or None),
+                                        ("transcript", transcript), ("target_clips", target_clips),
+                                        ("clip_min_seconds", clip_min_seconds),
+                                        ("clip_max_seconds", clip_max_seconds),
+                                        ("clip_instructions", clip_instructions))
+                 if raw not in (None, "")]
+        if extra:
+            raise HTTPException(status_code=400, detail=(
+                f"{', '.join(extra)} can't be used when rendering chosen clips: the clips "
+                "are already chosen and the transcript comes from the source job"))
+        render_source = await _agent_render_source(request, str(source_job_id))
+        try:
+            agent_clip_list = normalize_agent_clips(
+                json.loads(clips) if isinstance(clips, str) else clips, render_source["duration"])
+        except (AgentClipsError, ValueError) as e:
+            raise HTTPException(status_code=400, detail=f"clips: {e}")
+        # The look the caller asked for when the source job was submitted,
+        # unless this request says otherwise.
+        inherited = render_source["render"]
+        if output_format is None:
+            output_format = inherited.get("output_format")
+        if layouts is None:
+            layouts = inherited.get("layouts")
+        if auto_hook is None:
+            auto_hook = inherited.get("auto_hook", True)
+        if auto_hook_style is None:
+            auto_hook_style = inherited.get("auto_hook_style")
+        if captions is None:
+            captions = inherited.get("captions", True)
+
+    if (selection == "ai" and render_source is None and not api_key
+            and not await llm_available_without_key()):
         raise gemini_missing_error()
     if selection == "agent":
         steering = [name for name, raw in (("target_clips", target_clips),
@@ -2301,7 +2384,7 @@ async def process_endpoint(
     if upload_id and not url and not file and not thumb_session:
         upload_slot = _take_pending_upload(upload_id, await _owner_id(request))
 
-    if not url and not file and not thumb_session and not upload_slot:
+    if not url and not file and not thumb_session and not upload_slot and not render_source:
         raise HTTPException(status_code=400, detail="Must provide URL, File or upload_id")
 
     # Completion callback: reject unsafe targets NOW (clear 400) — delivery
@@ -2360,7 +2443,7 @@ async def process_endpoint(
         "user_agent": user_agent,
         "timestamp": time.time(),
         "source": ("thumbnail_session" if thumb_session else "upload_id" if upload_slot
-                   else "url" if url else "file"),
+                   else "agent_render" if render_source else "url" if url else "file"),
     }
 
     job_id = str(uuid.uuid4())
@@ -2499,6 +2582,27 @@ async def process_endpoint(
         os.replace(src, input_path)
         pending_uploads.pop(upload_id, None)
         cmd.extend(["-i", input_path])
+    elif render_source:
+        # The source job's video, hardlinked into THIS job's dir under the source
+        # job's title: the clips get that name, main.py records it as
+        # source_video, and the clip editor finds it there (_locate_source). A
+        # link next to the original costs no disk; uploads/ can be another
+        # mount, where a link is impossible.
+        ext = os.path.splitext(render_source["source"])[1] or ".mp4"
+        input_path = os.path.join(job_output_dir, f"{render_source['title']}{ext}")
+        try:
+            os.link(render_source["source"], input_path)
+        except OSError:
+            shutil.copyfile(render_source["source"], input_path)
+        cmd.extend(["-i", input_path])
+        transcript_path = os.path.join(job_output_dir, "source_transcript.json")
+        with open(transcript_path, "w", encoding="utf-8") as fh:
+            json.dump(render_source["transcript"], fh)
+        clips_path = os.path.join(job_output_dir, "agent_clips.json")
+        with open(clips_path, "w", encoding="utf-8") as fh:
+            json.dump(agent_clip_list, fh, indent=2)
+        cmd.extend(["--transcript", transcript_path, "--clips-file", clips_path])
+        print(f"[render] job={job_id} source={render_source['job_id']} clips={len(agent_clip_list)}")
     else:
         # Save uploaded file with size limit check.
         # basename() strips any path components from the client-supplied

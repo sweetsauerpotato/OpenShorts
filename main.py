@@ -36,8 +36,11 @@ from clip_selection import (build_transcript_windows, clip_count_targets,
                             gemini_overload_budget)
 from ffmpeg_utils import (video_encode_args, audio_encode_args, QUALITY,
                           QUALITY_FAST, METADATA_SCRUB)
-from transcript_import import (clip_ranges, coverage_note, format_clock,
-                               merge_exact_words, transcript_misfit)
+from transcript_import import (clip_ranges, coverage_note, covered, format_clock,
+                               line_span, map_to_exact, merge_exact_words,
+                               transcript_misfit)
+from agent_clips import snap_edge
+import recut
 from dotenv import load_dotenv
 import json
 
@@ -1168,30 +1171,43 @@ def auto_hook_clip(clip_path, clip):
     Returns (hooked_path, hook_config), or None when skipped or failed — a
     hook problem must never cost the user the clip itself (same fail-open
     contract as auto_caption_clip)."""
+    record = auto_hook_record(clip)
+    if record is None:
+        return None
+    try:
+        from hooks import add_hook_to_video
+        output_dir = os.path.dirname(clip_path)
+        out_path = os.path.join(
+            output_dir, f"hooked_{int(time.time())}_{os.path.basename(clip_path)}")
+        add_hook_to_video(clip_path, record["text"], out_path, position="top",
+                          duration=record["duration_seconds"], style=record["style"])
+        print(f"   🪝 Hook burned ({record['style']}, {record['duration_seconds']:g}s): "
+              f"{record['text']}")
+        return out_path, record
+    except Exception as e:
+        print(f"   ⚠️ Auto-hook failed ({type(e).__name__}: {e}) — "
+              f"delivering the clip without it.")
+        return None
+
+
+def auto_hook_record(clip):
+    """The hook AUTO_HOOK burns on this clip, as the ``auto_hook`` record
+    (hooks.burn_recorded_hook takes the same), or None without hook text."""
     text = (clip.get('viral_hook_text') or '').strip()
     if not text:
         return None
     style = os.environ.get("AUTO_HOOK_STYLE", "classic")
     try:
+        from hooks import HOOK_STYLES
+        if style not in HOOK_STYLES:
+            style = "classic"
+    except Exception:
+        style = "classic"
+    try:
         seconds = float(os.environ.get("AUTO_HOOK_SECONDS", "5"))
     except ValueError:
         seconds = 5.0
-    try:
-        from hooks import add_hook_to_video, HOOK_STYLES
-        if style not in HOOK_STYLES:
-            style = "classic"
-        output_dir = os.path.dirname(clip_path)
-        out_path = os.path.join(
-            output_dir, f"hooked_{int(time.time())}_{os.path.basename(clip_path)}")
-        add_hook_to_video(clip_path, text, out_path, position="top",
-                          duration=seconds, style=style)
-        print(f"   🪝 Hook burned ({style}, {seconds:g}s): {text}")
-        return out_path, {"text": text, "style": style, "position": "top",
-                          "duration_seconds": seconds}
-    except Exception as e:
-        print(f"   ⚠️ Auto-hook failed ({type(e).__name__}: {e}) — "
-              f"delivering the clip without it.")
-        return None
+    return {"text": text, "style": style, "position": "top", "duration_seconds": seconds}
 
 
 def render_clip(input_video, final_output_video, output_format="auto",
@@ -1912,22 +1928,18 @@ def transcribe_range(input_video, start, end, video_duration, language=None):
     return segments
 
 
-def refine_pasted_transcript(input_video, transcript, clips, video_duration):
-    """Exact words for the chosen clips of a transcript the user pasted in.
+def _flat_words(transcript):
+    return [{'w': w['word'], 's': float(w['start']), 'e': float(w['end'])}
+            for seg in (transcript or {}).get('segments', []) for w in seg.get('words') or []]
 
-    The pasted transcript chose the clips, but its word times are estimates:
-    YouTube's panel copy is accurate to the second, and replaying 82 saved clip
-    answers on such times cut off the last word of 33-43% of the clips
-    (15-sep-2026). Whisper on the clips alone, 8 s either side (13-19% of the
-    video on two real jobs), replaces those words, and every clip is cut again
-    on them. Returns the transcript to keep; ``clips`` are updated in place.
-    """
-    if (transcript or {}).get("origin") != "pasted" or not clips:
-        return transcript
-    ranges = clip_ranges([(c["start"], c["end"]) for c in clips], video_duration)
-    covered = sum(hi - lo for lo, hi in ranges)
-    print(f"🎙️ Transcribing only the chosen clips: {len(ranges)} stretch(es), "
-          f"{covered / 60:.1f} of {video_duration / 60:.1f} min.")
+
+def _pieces(clip):
+    """A clip's pieces: an agent clip's segments, or its one start-end stretch."""
+    return clip.get('segments') or [{'start': clip['start'], 'end': clip['end']}]
+
+
+def _transcribe_into(input_video, transcript, ranges, video_duration):
+    """Whisper on ``ranges``: (transcript with their exact words, ranges done)."""
     exact, done = [], []
     for lo, hi in ranges:
         try:
@@ -1936,25 +1948,109 @@ def refine_pasted_transcript(input_video, transcript, clips, video_duration):
             done.append((lo, hi))
         except Exception as e:
             print(f"   ⚠️ Could not transcribe {format_clock(lo)}-{format_clock(hi)} "
-                  f"({type(e).__name__}: {e}); clips there keep the pasted timing.")
-    if not done:
-        return transcript
+                  f"({type(e).__name__}: {e}); cuts there keep the pasted timing.")
+    return (merge_exact_words(transcript, exact, done) if done else transcript), done
 
-    refined = merge_exact_words(transcript, exact, done)
-    words = [{'w': w['word'], 's': w['start'], 'e': w['end']}
-             for seg in refined['segments'] for w in seg.get('words', [])]
+
+def _cut_on_exact_words(pasted, refined, clips, chosen, video_duration):
+    """Cut every clip again, from the edges as chosen on the pasted times.
+
+    Each chosen edge is first carried onto the exact words by aligning the two
+    transcripts' text (map_to_exact): an edge "after the word X" must land after
+    the real X, and the estimate can be seconds off. Then a whole clip is cut on
+    sentences like the pipeline's, and an agent's piece on the gap beside its
+    word (snap_edge), since those cuts are deliberate.
+    """
+    estimated = _flat_words(pasted)
+    words = _flat_words(refined)
+    ranges = refined.get('exact_ranges') or []
+    exact = [w for w in words if any(lo <= w['s'] < hi for lo, hi in ranges)]
     spans = sentence_spans(words)
     min_secs, max_secs = clip_duration_bounds()
-    for n, clip in enumerate(clips, 1):
+
+    def to_exact(t, kind):
+        mapped = map_to_exact(t, [w for w in estimated if abs(w['s'] - t) <= 45],
+                              [w for w in exact if abs(w['s'] - t) <= 45], prefer=kind)
+        return t if mapped is None else mapped
+
+    for n, (clip, pieces) in enumerate(zip(clips, chosen), 1):
         old = (float(clip['start']), float(clip['end']))
-        ns, ne = snap_clip_to_sentences(old[0], old[1], words, video_duration,
-                                        min_duration=min_secs, max_duration=max_secs,
-                                        spans=spans)
-        if abs(ns - old[0]) > 0.05 or abs(ne - old[1]) > 0.05:
-            print(f"   ✂️ Clip {n}: start {ns - old[0]:+.1f}s, end {ne - old[1]:+.1f}s "
-                  f"on the exact words.")
-        clip['start'], clip['end'] = ns, ne
+        if clip.get('segments'):
+            new = []
+            for p in pieces:
+                s = snap_edge(to_exact(p['start'], 'start'), words, 'start')
+                e = snap_edge(to_exact(p['end'], 'end'), words, 'end')
+                new.append({'start': s, 'end': e} if e - s >= 0.5 else dict(p))
+            clip['segments'] = new
+            clip['start'] = min(p['start'] for p in new)
+            clip['end'] = max(p['end'] for p in new)
+        else:
+            clip['start'], clip['end'] = snap_clip_to_sentences(
+                to_exact(pieces[0]['start'], 'start'), to_exact(pieces[0]['end'], 'end'), words,
+                video_duration, min_duration=min_secs, max_duration=max_secs, spans=spans)
+        if abs(clip['start'] - old[0]) > 0.05 or abs(clip['end'] - old[1]) > 0.05:
+            print(f"   ✂️ Clip {n}: start {clip['start'] - old[0]:+.1f}s, "
+                  f"end {clip['end'] - old[1]:+.1f}s on the exact words.")
+
+
+def refine_pasted_transcript(input_video, transcript, clips, video_duration):
+    """Exact words for the chosen clips of a transcript the user pasted in.
+
+    The pasted transcript chose the clips, but its word times are estimates:
+    YouTube's panel copy is accurate to the second, and replaying 82 saved clip
+    answers on such times cut off the last word of 33-43% of the clips
+    (15-sep-2026). Whisper on the clips alone, 8 s either side (13-19% of the
+    video on two real jobs), replaces those words, and every clip is cut again
+    on them (_cut_on_exact_words). A cut can move past what Whisper heard: on a
+    real paste, whose lines ran ~20 s, one clip's end moved 11 s and was cut on
+    the estimates. Those stretches are transcribed too and the clips cut again.
+    Works for the pipeline's clips and an agent's pieces alike. Returns the
+    transcript to keep; ``clips`` are updated in place.
+    """
+    if (transcript or {}).get("origin") != "pasted" or not clips:
+        return transcript
+    chosen = [[dict(p) for p in _pieces(c)] for c in clips]
+
+    def reach(piece):
+        # Line-timed words can be anywhere inside their line: hear whole lines.
+        lo, hi = piece['start'], piece['end']
+        if transcript.get('timing') == 'line':
+            lo, hi = min(lo, line_span(transcript, lo)[0]), max(hi, line_span(transcript, hi)[1])
+        return lo, hi
+    ranges = clip_ranges([reach(p) for pieces in chosen for p in pieces], video_duration)
+    print(f"🎙️ Transcribing only the chosen clips: {len(ranges)} stretch(es), "
+          f"{sum(hi - lo for lo, hi in ranges) / 60:.1f} of {video_duration / 60:.1f} min.")
+    refined, done = _transcribe_into(input_video, transcript, ranges, video_duration)
+    if not done:
+        return transcript
+    _cut_on_exact_words(transcript, refined, clips, chosen, video_duration)
+
+    outside = [(p['start'], p['end']) for c in clips for p in _pieces(c)
+               if not covered(p['start'], p['end'], refined.get('exact_ranges'), video_duration)]
+    if outside:
+        more = clip_ranges(outside, video_duration)
+        print(f"🎙️ {len(outside)} cut(s) moved past what was transcribed: transcribing "
+              f"{sum(hi - lo for lo, hi in more) / 60:.1f} min more.")
+        refined, extra = _transcribe_into(input_video, refined, more, video_duration)
+        if extra:
+            _cut_on_exact_words(transcript, refined, clips, chosen, video_duration)
     return refined
+
+
+def cut_agent_clips_on_words(transcript, clips):
+    """An agent's pieces on an exact (Whisper) transcript: each edge in the gap
+    beside its word, so no word is cut in half."""
+    words = _flat_words(transcript)
+    for clip in clips:
+        if not clip.get('segments'):
+            continue
+        new = []
+        for p in clip['segments']:
+            s, e = snap_edge(p['start'], words, 'start'), snap_edge(p['end'], words, 'end')
+            new.append({'start': s, 'end': e} if e - s >= 0.5 else dict(p))
+        clip['segments'] = new
+        clip['start'] = min(p['start'] for p in new)
+        clip['end'] = max(p['end'] for p in new)
 
 
 def get_visual_clips(video_path, video_duration, language="en", instructions=None):
@@ -2068,10 +2164,20 @@ if __name__ == '__main__':
                         help="Download and transcribe, then stop: the metadata keeps the "
                              "transcript and no clips, for an agent to choose them "
                              "(selection=agent). Keeps a downloaded source.")
+    parser.add_argument('--clips-file', type=str,
+                        help="JSON list of clips an agent chose (agent_clips.normalize_agent_clips "
+                             "shape): render them instead of choosing any.")
 
     args = parser.parse_args()
-    if args.transcribe_only and args.skip_analysis:
-        parser.error("--transcribe-only and --skip-analysis cannot be combined")
+    if sum(bool(x) for x in (args.transcribe_only, args.skip_analysis, args.clips_file)) > 1:
+        parser.error("--transcribe-only, --skip-analysis and --clips-file cannot be combined")
+    agent_clips = None
+    if args.clips_file:
+        # Read before any work, like the instructions: a broken file fails in
+        # seconds, not after the download.
+        with open(args.clips_file, encoding="utf-8") as fh:
+            agent_clips = json.load(fh)
+        print(f"🎯 Rendering {len(agent_clips)} clip(s) the agent chose.")
     output_format = args.format
 
     # Read the instructions BEFORE any download or transcription: the caller
@@ -2224,7 +2330,9 @@ if __name__ == '__main__':
 
         # Music-only or wordless footage transcribes to a handful of words.
         # Clip it by what is on screen instead, like a video with no audio.
-        if transcript is not None and speech_is_sparse(transcript, duration):
+        # (An agent's clips are already chosen: nothing to pick by vision.)
+        if (transcript is not None and agent_clips is None
+                and speech_is_sparse(transcript, duration)):
             n_words = sum(len((sg.get("text") or "").split()) for sg in transcript["segments"])
             print(f"🔇 Only {n_words} word(s) of speech in {duration:.0f}s — "
                   f"switching to visual analysis.")
@@ -2242,6 +2350,8 @@ if __name__ == '__main__':
             n_words = sum(len((sg.get('text') or '').split()) for sg in transcript['segments'])
             print(f"📝 Transcript ready: {n_words} words over {duration / 60:.1f} min. "
                   f"No clips chosen: the agent chooses them (selection=agent).")
+        elif agent_clips is not None:
+            clips_data = {"shorts": agent_clips, "selection": "agent"}
         elif transcript is not None:
             clips_data = get_viral_clips(transcript, duration, instructions=clip_instructions)
         else:
@@ -2259,9 +2369,12 @@ if __name__ == '__main__':
             print(f"🔥 Found {len(clips_data['shorts'])} clips!")
 
             # A pasted transcript chose the clips on estimated word times: get
-            # the real ones where the clips are, and cut again on them.
+            # the real ones where the clips are, and cut again on them. An
+            # agent's pieces on Whisper's words only need their edges in gaps.
             transcript = refine_pasted_transcript(
                 input_video, transcript, clips_data['shorts'], duration)
+            if agent_clips is not None and (transcript or {}).get('origin') != 'pasted':
+                cut_agent_clips_on_words(transcript, clips_data['shorts'])
 
             # Save metadata. Silent videos have no transcript → no subtitles,
             # which is correct (there's no speech to caption).
@@ -2317,6 +2430,34 @@ if __name__ == '__main__':
                     # seam there, and /api/subtitle needs it again later.
                     import layout_ranges as _layouts
                     clip['layout_ranges'] = _layouts.read(clip_final_path)
+                    pieces = clip.get('segments')
+                    if success and pieces and not (
+                            len(pieces) == 1 and abs(pieces[0]['start'] - start) < 1e-3
+                            and abs(pieces[0]['end'] - end) < 1e-3):
+                        # An agent's clip in pieces (a cold open, dead parts left
+                        # out): the reframed stretch above covers them all, and
+                        # the clip editor's engine cuts them out of it, burning
+                        # the hook and captions in the same layer order. The
+                        # recipe keeps the stretch as the canonical range, so a
+                        # later edit takes the editor's fast path.
+                        hook = (auto_hook_record(clip)
+                                if os.environ.get("AUTO_HOOK") == "1" else None)
+                        served, recut_name = recut.perform_recut(
+                            input_path=clip_final_path,
+                            segments=recut.rebase_segments(pieces, start, end),
+                            output_dir=output_dir, clean_name=clip_filename,
+                            captions_transcript=(recut.virtual_transcript(transcript, pieces)
+                                                 if transcript else None),
+                            hook=hook, captioner=auto_caption_clip)
+                        clip['recipe'] = {"v": 1, "segments": pieces,
+                                          "canonical_range": {"start": start, "end": end}}
+                        clip['layout_ranges'] = _layouts.read(os.path.join(output_dir, recut_name))
+                        if hook and re.match(r'^(?:subtitled_\d+_)?hooked_\d+_', served):
+                            clip['auto_hook'] = hook
+                        print(f"   ✅ Clip {i+1} ready: {len(pieces)} pieces, "
+                              f"{recut.total_duration(pieces):.1f}s")
+                        print(f"CLIP_READY {i} {served}")
+                        return success
                     if success and os.environ.get("AUTO_HOOK") == "1":
                         hooked = auto_hook_clip(clip_final_path, clip)
                         if hooked:
@@ -2353,9 +2494,9 @@ if __name__ == '__main__':
                     except Exception as e:
                         print(f"   ❌ Clip {i+1} failed: {type(e).__name__}: {e}")
 
-            # Persist per-clip render results added by the workers (auto_hook)
-            # so the editor can see what is already burned into each clip.
-            if any('auto_hook' in c for c in shorts):
+            # Persist per-clip render results added by the workers (auto_hook,
+            # an agent clip's recipe) so the editor sees what each clip is.
+            if any('auto_hook' in c or 'recipe' in c for c in shorts):
                 with open(metadata_file, 'w') as f:
                     json.dump(clips_data, f, indent=2)
 

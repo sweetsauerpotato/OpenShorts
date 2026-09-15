@@ -203,8 +203,21 @@ Whisper transcript, 1 clip):
 `transcribe_media(language=)` takes the pasted transcript's language, because
 Whisper guesses from the first 30 s and a short stretch can open on music.
 Agent jobs with a transcript skip Whisper entirely (8 s instead of 93 s on a
-3.1-min upload). The clips an agent sends will need the same clip-only pass
-when they are rendered.
+3.1-min upload); an agent's clips get the same clip-only pass when they render.
+
+**What a real paste looks like** (a 23-min YouTube video, 16-sep-2026), against
+the Whisper transcript of the same file:
+- 65 lines of ~20 s each (13-54 s), ~68 words per line — nothing like the 2.6 s
+  Whisper lines the first measurement simulated
+- the line timestamps are accurate (median 0.26 s from Whisper's, never 2 s
+  off); it is the word's place INSIDE its line that is a guess, so
+  `refine_pasted_transcript` hears whole lines around every cut (`line_span`)
+  and transcribes a second stretch when a cut then moves past what it heard
+  (one clip's end moved 11 s on that job and had been cut on the estimates)
+- 288 ">>" speaker marks and 44 "[ __ ]" bleeps: kept in the line text, never
+  words (they would end up in captions and in the agent's sentences)
+- the words themselves agree with Whisper 83% of the time, so the pasted text
+  chooses and Whisper's words cut
 
 ## Development Commands
 
@@ -258,6 +271,7 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 | `clip_selection.py` | Stdlib-only clip-selection helpers: windows, shortlist, sentence cuts, creator instructions, Gemini retry policy, model prices |
 | `tools/compare_selection.py` | Harness that measures clip selection on a cached transcript (see "How clips are chosen") |
 | `transcript_import.py` | Stdlib-only reader for pasted transcripts (YouTube panel, SRT, VTT, JSON) and the clip-range merge of exact words (see "Pasted transcripts") |
+| `agent_clips.py` | Stdlib-only validation of the clips an agent sends (render_clips) and where their piece edges land |
 | `app.py` | FastAPI server with async job queue and REST endpoints |
 | `editor.py` | Gemini AI integration for dynamic video effects (FFmpeg filter generation) |
 | `hooks.py` | Hook text overlay generation with font rendering |
@@ -531,6 +545,42 @@ under it.
   Two things about Claude Code as the client: it gives the model a tool result
   once (not both `content` and `structuredContent`), and it keeps the tool list
   from session start, so new tools and fields need an MCP reconnect.
+- **render_clips** (`/api/process` with `source_job_id` + `clips`, MCP,
+  16-sep-2026): the agent's own clips, rendered from a finished job's retained
+  video and transcript into a job of their own. A clip is `segments`: pieces of
+  the source in play order, so it can open on its punchline and drop dead parts,
+  plus hook, title, descriptions, score and reason (`agent_clips.
+  normalize_agent_clips` validates and renames them to the pipeline's fields).
+  Everything is checked before any work: at most 15 clips, 12 pieces, 5 s total,
+  180 s of source span (all pieces are cut out of ONE reframed stretch), and the
+  text limits of the platforms. The look (format, layouts, hook, style,
+  captions) comes from the source job's `agent_job.json` unless the request
+  says otherwise, and no Gemini key is needed.
+  - **Rendering** (`main.py --clips-file`): the covering stretch is cut and
+    reframed as the canonical clip, then `recut.perform_recut` takes the pieces
+    out of it, burns the hook and the captions of the concatenated timeline
+    (`virtual_transcript`), and the clip records its `recipe`, so the editor's
+    fast re-cut works on it afterwards. A single piece equal to the stretch
+    renders through the pipeline's own path.
+  - **Edges** go in the silence beside their word (`agent_clips.snap_edge`):
+    at most 0.5 s before / 0.4 s after and never past the middle of the gap, so
+    a neighbouring word cannot leak in. The lead is generous because a word's
+    onset after a pause is where Whisper is least sure — two runs over the same
+    audio placed "Those" at 148.32 s and 147.84 s (the waveform says 147.87),
+    and a 0.3 s lead cut into the word.
+  - **A pasted transcript** is carried onto the exact words first
+    (`transcript_import.map_to_exact`, aligning the two transcripts' text), then
+    snapped. `prefer` settles the tie where one word ends exactly where the next
+    starts: an end stays on the earlier word, a start goes to the later one.
+    Whisper hears whole pasted lines around each piece, since a line-timed word
+    can be anywhere inside its line (`line_span`).
+
+  Live through `/mcp` (16-sep-2026): a 4-piece 23.6 s clip, punchline first,
+  from the 3.1-min slice — 172 s from call to finished clip, captions following
+  the reordered pieces. The same clip chosen on a pasted transcript's estimates
+  landed within 0.06 s of the exact-transcript cut on 3 of 4 edges after the
+  fixes above; every piece keeps its first and last word (checked against a
+  separate whole-video Whisper run).
 
 ### Account erasure (GDPR art. 17)
 

@@ -226,6 +226,78 @@ class TestJson:
 
 # --- limits ----------------------------------------------------------------------
 
+class TestRealYouTubePaste:
+    """From a real 23-min paste (15-sep-2026): ~20 s lines, ">>" at each new
+    speaker, "[ __ ]" for a bleeped word."""
+    TEXT = ("0:01\nYo, what's good, bro? >> Oh, [ __ ] >> Jake Paul went from being a teenage "
+            "vine creator\n0:19\nSo, when we recently heard he bought a ranch &gt;&gt; we went")
+
+    def test_speaker_marks_and_bleeps_are_not_words(self):
+        words = [w["word"].strip() for w in _all_words(parse_transcript(self.TEXT, language="en"))]
+        assert ">>" not in words and "__" not in words and "[" not in words
+        assert words[:4] == ["Yo,", "what's", "good,", "bro?"]
+        assert "&gt;&gt;" not in " ".join(words) and ">>" not in " ".join(words)
+
+    def test_the_line_keeps_them_as_written(self):
+        assert ">> Oh, [ __ ] >>" in parse_transcript(self.TEXT, language="en")["segments"][0]["text"]
+
+
+class TestMapToExact:
+    EST = [{"w": w, "s": s, "e": s + 0.5} for w, s in
+           (("so", 10.0), ("here", 10.5), ("is", 11.0), ("the", 11.5), ("thing.", 12.0), ("Next", 12.5))]
+    # the real words came 2 s later and slower
+    EXACT = [{"w": w, "s": s, "e": s + 0.6} for w, s in
+             (("So", 12.0), ("here", 12.7), ("is", 13.4), ("the", 14.1), ("thing.", 14.8), ("Next", 15.5))]
+
+    def test_an_edge_after_a_word_lands_after_the_real_word(self):
+        # The estimated "thing." ends where "Next" starts (12.5): the edge lands
+        # in the real gap between them, 15.4-15.5, where snap_edge cuts either way.
+        assert 15.4 <= ti.map_to_exact(12.5, self.EST, self.EXACT) <= 15.5
+        assert ti.map_to_exact(10.0, self.EST, self.EXACT) == pytest.approx(12.0)
+
+    def test_a_shared_boundary_goes_the_way_the_edge_does(self):
+        # A clip's END at that boundary must stay on "thing.", its START go to
+        # "Next": one Whisper run wrote a zero-length word there and a clip's
+        # end jumped a second forward (16-sep-2026).
+        assert ti.map_to_exact(12.5, self.EST, self.EXACT, prefer="end") == pytest.approx(15.4)
+        assert ti.map_to_exact(12.5, self.EST, self.EXACT, prefer="start") == pytest.approx(15.5)
+
+    def test_times_between_words_are_interpolated(self):
+        assert ti.map_to_exact(11.25, self.EST, self.EXACT) == pytest.approx((13.4 + 14.0) / 2)
+
+    def test_outside_the_matches_it_keeps_the_nearest_offset(self):
+        # past the last match ("Next" ends 13.0 -> 16.1): the same +3.1 s offset
+        assert ti.map_to_exact(20.0, self.EST, self.EXACT) == pytest.approx(23.1)
+
+    def test_different_words_in_between_do_not_stop_it(self):
+        exact = [dict(w) for w in self.EXACT]
+        exact[2]["w"] = "was"   # Whisper heard it differently
+        assert 15.4 <= ti.map_to_exact(12.5, self.EST, exact) <= 15.5
+        assert ti.map_to_exact(11.25, self.EST, exact) == pytest.approx(13.7)
+
+    def test_nothing_in_common(self):
+        assert ti.map_to_exact(11.0, self.EST, [{"w": "zzz", "s": 1, "e": 2}]) is None
+        assert ti.map_to_exact(11.0, self.EST, []) is None
+
+    def test_a_misaligned_repeat_never_folds_time_back(self):
+        exact = self.EXACT + [{"w": "so", "s": 3.0, "e": 3.2}]   # a stray early "so"
+        exact.sort(key=lambda w: w["s"])
+        assert ti.map_to_exact(12.5, self.EST, exact) >= 14.0
+
+
+class TestCovered:
+    def test_needs_a_margin_inside_one_range(self):
+        assert ti.covered(20, 30, [[10.0, 40.0]])
+        assert not ti.covered(10.5, 30, [[10.0, 40.0]])     # too close to the start
+        assert not ti.covered(20, 39.5, [[10.0, 40.0]])     # too close to the end
+        assert not ti.covered(20, 50, [[10.0, 40.0], [40.0, 60.0]])   # spans two ranges
+
+    def test_the_video_edges_need_no_margin(self):
+        assert ti.covered(0.0, 10, [[0.0, 20.0]])
+        assert ti.covered(50, 60.0, [[40.0, 60.0]], video_duration=60.0)
+        assert not ti.covered(50, 60.0, [[40.0, 60.0]])
+
+
 class TestLimits:
     @pytest.mark.parametrize("text,match", [
         (None, "must be text"),

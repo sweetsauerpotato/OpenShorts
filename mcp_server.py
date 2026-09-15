@@ -45,7 +45,11 @@ INSTRUCTIONS = (
     "30-60s or pass webhook_url) -> list_clips -> optionally add_subtitles / "
     "recut_clip / publish_clip. Check get_quota before large jobs. The user "
     "must own the content or hold the rights: ask once, then pass "
-    "confirm_rights=true."
+    "confirm_rights=true. To choose the clips yourself instead of OpenShorts' "
+    "AI: process_video with selection='agent' (add the user's transcript if "
+    "they have one) -> get_job_status until awaiting_clips -> get_transcript "
+    "(follow its rules) -> render_clips -> get_job_status on the new job -> "
+    "list_clips."
 )
 
 # Headers an MCP caller may use to authenticate / bring their own keys; they are
@@ -274,6 +278,58 @@ TOOLS = [
         },
     },
     {
+        "name": "render_clips",
+        "title": "Render the clips you chose",
+        "description": (
+            "Render your own choice of clips from a job's video: after get_transcript on a job "
+            "from process_video with selection='agent' (any finished job whose video is still "
+            "on the server works). Each clip is one or more pieces of the source in play order, "
+            "so it can open on its punchline and leave dead parts out, plus the hook text burned "
+            "over its first seconds, the title and the descriptions. OpenShorts cuts, reframes "
+            "and captions them like its own clips; the hook style, captions, layout and format "
+            "of the process_video call are kept. Put piece edges in the silence between words "
+            "(get_transcript with words=true); each edge is moved into the gap beside its word, "
+            "and with a pasted transcript the pieces are transcribed first and cut on the exact "
+            "words. A clip's pieces must lie within 180 s of the source. Returns a new job_id: "
+            "poll get_job_status (renders take minutes, ~4 per clip on a CPU), then list_clips."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "job_id": {"type": "string",
+                           "description": "The job whose video and transcript the clips come from."},
+                "clips": {
+                    "type": "array", "minItems": 1, "maxItems": 15,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "segments": {
+                                "type": "array", "minItems": 1, "maxItems": 12,
+                                "items": {"type": "object",
+                                          "properties": {"start": {"type": "number"},
+                                                         "end": {"type": "number"}},
+                                          "required": ["start", "end"]},
+                                "description": "Pieces in play order, seconds in the source video.",
+                            },
+                            "hook": {"type": "string", "maxLength": 150,
+                                     "description": "On-screen hook for the first seconds (max 10 words)."},
+                            "title": {"type": "string", "maxLength": 100,
+                                      "description": "YouTube Shorts title."},
+                            "tiktok_description": {"type": "string", "maxLength": 2200},
+                            "instagram_description": {"type": "string", "maxLength": 2200},
+                            "score": {"type": "number", "minimum": 0, "maximum": 100,
+                                      "description": "Your 0-100 score on the picking rules' scale."},
+                            "reason": {"type": "string", "maxLength": 500,
+                                       "description": "Why it hooks, one line."},
+                        },
+                        "required": ["segments"],
+                    },
+                },
+            },
+            "required": ["job_id", "clips"],
+        },
+    },
+    {
         "name": "get_quota",
         "title": "Get plan and remaining minutes",
         "description": (
@@ -488,12 +544,20 @@ def _clip_summaries(job_id, result):
     out = []
     for i, clip in enumerate(result.get("clips") or []):
         rel = clip.get("video_url") or ""
+        timed = (isinstance(clip.get("start"), (int, float))
+                 and isinstance(clip.get("end"), (int, float)))
+        # The clip's timeline: an edited or agent clip's pieces, else its stretch.
+        segments = (clip.get("recipe") or {}).get("segments") or (
+            [{"start": clip["start"], "end": clip["end"]}] if timed else [])
         out.append({
             "index": i,
             "title": clip.get("title") or clip.get("video_title_for_youtube_short"),
-            "duration_seconds": (round(clip["end"] - clip["start"], 1)
-                                 if isinstance(clip.get("start"), (int, float))
-                                 and isinstance(clip.get("end"), (int, float)) else None),
+            "duration_seconds": (round(sum(s["end"] - s["start"] for s in segments), 1)
+                                 if segments else None),
+            "segments": segments,
+            "hook": (clip.get("auto_hook") or {}).get("text") or clip.get("viral_hook_text"),
+            "score": clip.get("predicted_score"),
+            "reason": clip.get("reason") or None,
             "video_url": f"{base}{rel}" if base and rel.startswith("/") else rel,
             "youtube_title": clip.get("video_title_for_youtube_short"),
             "tiktok_description": clip.get("video_description_for_tiktok"),
@@ -524,6 +588,20 @@ async def _tool_get_transcript(client, args):
     if resp.status_code >= 400:
         return _api_error(resp), True
     return resp.json(), False
+
+
+async def _tool_render_clips(client, args):
+    # The rights were confirmed when the source job was submitted; this renders
+    # parts of that same video.
+    resp = await client.post("/api/process", json={
+        "source_job_id": args["job_id"], "clips": args["clips"], "acknowledged": True})
+    if resp.status_code >= 400:
+        return _api_error(resp), True
+    data = resp.json()
+    data["clips"] = len(args["clips"])
+    data["hint"] = ("Rendering takes minutes (~4 per clip on a CPU). Poll get_job_status on this "
+                    "job_id, then list_clips.")
+    return data, False
 
 
 async def _tool_get_quota(client, args):
@@ -585,6 +663,7 @@ _TOOL_IMPLS = {
     "get_job_status": _tool_get_job_status,
     "list_clips": _tool_list_clips,
     "get_transcript": _tool_get_transcript,
+    "render_clips": _tool_render_clips,
     "get_quota": _tool_get_quota,
     "add_subtitles": _tool_add_subtitles,
     "recut_clip": _tool_recut_clip,

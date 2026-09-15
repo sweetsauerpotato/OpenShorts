@@ -245,8 +245,11 @@ class TestRefine:
         clips = [{"start": 30.0, "end": 42.0}]
         refined = main.refine_pasted_transcript("video.mp4", pasted, clips, 120.0)
 
-        assert calls == [(22.0, 50.0, "en")]            # 8 s either side, once
-        assert refined["exact_ranges"] == [[22.0, 50.0]]
+        # 8 s either side, once — and out to the end of the pasted line the cut
+        # sits in (0:42's line reaches 45.6), since a line-timed word can be
+        # anywhere inside its line.
+        assert calls == [(22.0, 53.6, "en")]
+        assert refined["exact_ranges"] == [[22.0, 53.6]]
         words = [w for seg in refined["segments"] for w in seg["words"]]
         assert ("here.", 41.6) in [(w["word"].strip(), w["start"]) for w in words]
         assert clips[0]["end"] >= 42.6                   # the last word is whole now
