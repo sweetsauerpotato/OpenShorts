@@ -164,6 +164,48 @@ sent: bursts of 3-6 consecutive 503s used to fail the job and now recover.
 `get_visual_clips` (silent video) and the layout picker make their own
 single-attempt calls and do not use this loop.
 
+### Pasted transcripts (`transcript_import.py`)
+
+`transcript` on `/api/process` (dashboard: the "I have the transcript" box;
+MCP `process_video`) takes a transcript the user already has: YouTube's "Show
+transcript" list copied as is, SRT, WebVTT (YouTube's word-timed auto-caption
+VTT included) or OpenShorts JSON. It is parsed at submit, so a paste the app
+cannot read is a 400 that says how to fix it (at most 300,000 characters, which
+also stays under Starlette's 1 MiB form-part limit), and refused when its last
+line starts more than 2 s after the video ends: that is another video's
+transcript. main.py gets it as `--transcript` with `origin: "pasted"` and never
+transcribes the whole video; a misfit only found after the download fails the
+job instead of transcribing.
+
+**It chooses the clips; Whisper still cuts them** (15-sep-2026, decided with
+the measurement). Only VTT word tags and JSON words carry real word times.
+Everything else gets each line's words spread over the line by length. Turning
+Whisper's own transcripts into what a user pastes and re-cutting 82 saved clip
+answers against the true words:
+- YouTube panel copy (whole-second times): median word error 0.5 s; 33-43% of
+  clips cut off their last word, and 50-67% without punctuation, which is how
+  auto-captions come
+- SRT with exact times: 0.15 s; 0-4% of clips cut off their last word
+- Whisper (today): 0%
+
+So `main.refine_pasted_transcript` runs Whisper on the chosen clips alone,
+8 s either side (the sentence cut's `max_shift`), merges those exact words in
+(`merge_exact_words`; `exact_ranges` says where the times are real) and cuts
+every clip again on them. That was 13-19% of the video on two real jobs.
+Live through `/mcp` (3.1-min upload, a panel-format paste made from its own
+Whisper transcript, 1 clip):
+- the cut on the estimates, 112.95-152.04, ended inside "concept." and opened
+  mid-sentence
+- Whisper on 0.9 of the 3.1 min (21 s of CPU; 95% the same words as
+  whole-video Whisper, median time difference 0.00 s) moved it to
+  111.75-152.64: whole sentences, and the captions end on "CONCEPT." at the
+  clip's last second
+`transcribe_media(language=)` takes the pasted transcript's language, because
+Whisper guesses from the first 30 s and a short stretch can open on music.
+Agent jobs with a transcript skip Whisper entirely (8 s instead of 93 s on a
+3.1-min upload). The clips an agent sends will need the same clip-only pass
+when they are rendered.
+
 ## Development Commands
 
 ### Local Development (Docker)
@@ -215,6 +257,7 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 | `main.py` | Core video processing: transcription, scene detection, clip extraction, vertical reframing |
 | `clip_selection.py` | Stdlib-only clip-selection helpers: windows, shortlist, sentence cuts, creator instructions, Gemini retry policy, model prices |
 | `tools/compare_selection.py` | Harness that measures clip selection on a cached transcript (see "How clips are chosen") |
+| `transcript_import.py` | Stdlib-only reader for pasted transcripts (YouTube panel, SRT, VTT, JSON) and the clip-range merge of exact words (see "Pasted transcripts") |
 | `app.py` | FastAPI server with async job queue and REST endpoints |
 | `editor.py` | Gemini AI integration for dynamic video effects (FFmpeg filter generation) |
 | `hooks.py` | Hook text overlay generation with font rendering |

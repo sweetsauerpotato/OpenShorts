@@ -809,6 +809,8 @@ function App() {
         layouts: data.layout && data.layout !== 'auto' ? data.layout : null,
         // Creator instructions for clip selection; blank never travels.
         clip_instructions: data.clipInstructions || null,
+        // A transcript the user pasted: the job skips whole-video transcription.
+        transcript: data.transcript || null,
       };
 
       if (data.type === 'url') {

@@ -32,6 +32,7 @@ import recut
 import layout_ranges
 import llm_provider
 from clip_selection import normalize_clip_instructions, CLIP_INSTRUCTIONS_MAX_CHARS
+from transcript_import import parse_transcript, transcript_misfit, TranscriptFormatError
 
 load_dotenv()
 
@@ -2138,6 +2139,13 @@ def layout_env(requested):
 AGENT_JOB_FILE = "agent_job.json"
 
 
+def _reject_transcript_misfit(pasted_transcript, video_duration):
+    """400 when a pasted transcript runs past the end of the video."""
+    misfit = transcript_misfit(pasted_transcript, video_duration) if pasted_transcript else None
+    if misfit:
+        raise HTTPException(status_code=400, detail=f"transcript: {misfit}")
+
+
 @app.post("/api/process")
 async def process_endpoint(
     request: Request,
@@ -2160,6 +2168,7 @@ async def process_endpoint(
     quality: Optional[str] = Form(None),
     clip_instructions: Optional[str] = Form(None),
     selection: Optional[str] = Form(None),
+    transcript: Optional[str] = Form(None),
 ):
     api_key = await resolve_gemini(request)
 
@@ -2188,6 +2197,7 @@ async def process_endpoint(
         quality = body.get("quality")
         clip_instructions = body.get("clip_instructions")
         selection = body.get("selection")
+        transcript = body.get("transcript")
 
     # Who chooses the clips. "ai" (default) is the Gemini/Ollama selection.
     # "agent": the job only downloads and transcribes, and the agent (e.g.
@@ -2237,6 +2247,19 @@ async def process_endpoint(
         raise HTTPException(status_code=400, detail=(
             f"clip_instructions must be at most {CLIP_INSTRUCTIONS_MAX_CHARS} characters "
             f"(got {len(instructions)})"))
+
+    # A transcript the user already has (YouTube's transcript panel, SRT/VTT,
+    # JSON). It chooses the clips, so the job never transcribes the whole video,
+    # only the chosen clips (main.refine_pasted_transcript). Parsed here: a paste
+    # the app cannot read is a 400 now, not a job that fails after the download.
+    if transcript is not None and not isinstance(transcript, str):
+        raise HTTPException(status_code=400, detail="transcript must be text")
+    pasted_transcript = None
+    if transcript and transcript.strip():
+        try:
+            pasted_transcript = parse_transcript(transcript)
+        except TranscriptFormatError as e:
+            raise HTTPException(status_code=400, detail=f"transcript: {e}")
 
     # Accepts a JSON list or a comma-separated form field.
     if isinstance(layouts, str):
@@ -2293,6 +2316,7 @@ async def process_endpoint(
         source_duration = int(probe.get("duration") or 0)
         if MIN_SOURCE_SECONDS > 0 and 0 < source_duration < MIN_SOURCE_SECONDS:
             _reject_short_source(source_duration)
+        _reject_transcript_misfit(pasted_transcript, source_duration)
         max_height = int(probe.get("max_height") or 0)
         # Warn only below what the user actually asked for: someone who picked
         # 480p on a 480p video made a choice, not a mistake.
@@ -2425,6 +2449,9 @@ async def process_endpoint(
         if MIN_SOURCE_SECONDS > 0 and 0 < src_duration < MIN_SOURCE_SECONDS:
             shutil.rmtree(job_output_dir, ignore_errors=True)
             _reject_short_source(src_duration)
+        if transcript_misfit(pasted_transcript, src_duration):
+            shutil.rmtree(job_output_dir, ignore_errors=True)
+            _reject_transcript_misfit(pasted_transcript, src_duration)
         input_path = os.path.join(UPLOAD_DIR, f"{job_id}_{os.path.basename(src)}")
         try:
             os.link(src, input_path)
@@ -2432,8 +2459,10 @@ async def process_endpoint(
             shutil.copyfile(src, input_path)
         cmd.extend(["-i", input_path])
         # An empty transcript (e.g. a silent or music-only source) is not worth
-        # forwarding: main.py would reject it and retranscribe anyway.
-        if thumb_session.get("transcript_ready") and (thumb_session.get("transcript") or {}).get("segments"):
+        # forwarding: main.py would reject it and retranscribe anyway. A pasted
+        # one wins: the user gave it for this job.
+        if (not pasted_transcript and thumb_session.get("transcript_ready")
+                and (thumb_session.get("transcript") or {}).get("segments")):
             transcript_path = os.path.join(job_output_dir, "source_transcript.json")
             with open(transcript_path, "w") as f:
                 json.dump(thumb_session["transcript"], f)
@@ -2446,6 +2475,10 @@ async def process_endpoint(
         if MIN_SOURCE_SECONDS > 0 and 0 < src_duration < MIN_SOURCE_SECONDS:
             shutil.rmtree(job_output_dir, ignore_errors=True)
             _reject_short_source(src_duration)
+        if transcript_misfit(pasted_transcript, src_duration):
+            # The upload stays in its slot: resend with the right transcript.
+            shutil.rmtree(job_output_dir, ignore_errors=True)
+            _reject_transcript_misfit(pasted_transcript, src_duration)
         input_path = os.path.join(UPLOAD_DIR, f"{job_id}_{upload_slot['filename']}")
         os.replace(src, input_path)
         pending_uploads.pop(upload_id, None)
@@ -2475,10 +2508,21 @@ async def process_endpoint(
             os.remove(input_path)
             shutil.rmtree(job_output_dir, ignore_errors=True)
             _reject_short_source(upload_duration)
+        if transcript_misfit(pasted_transcript, upload_duration):
+            os.remove(input_path)
+            shutil.rmtree(job_output_dir, ignore_errors=True)
+            _reject_transcript_misfit(pasted_transcript, upload_duration)
 
         cmd.extend(["-i", input_path])
 
     cmd.extend(["-o", job_output_dir])
+    if pasted_transcript:
+        transcript_path = os.path.join(job_output_dir, "source_transcript.json")
+        with open(transcript_path, "w", encoding="utf-8") as fh:
+            json.dump(pasted_transcript, fh)
+        cmd.extend(["--transcript", transcript_path])
+        print(f"[transcript] job={job_id} pasted, {pasted_transcript['timing']} timing, "
+              f"{len(pasted_transcript['segments'])} lines")
     if output_format and output_format != "auto":
         cmd.extend(["--format", output_format])
     # A file in the job dir, passed on the command line: the resume manifest

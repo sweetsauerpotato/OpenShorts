@@ -9,6 +9,8 @@ const SUPPORTED_PLATFORMS = [
 
 // Mirrors clip_selection.CLIP_INSTRUCTIONS_MAX_CHARS; the API rejects longer text.
 const CLIP_INSTRUCTIONS_MAX = 1000;
+// Mirrors transcript_import.TRANSCRIPT_MAX_CHARS; the API rejects longer text.
+const TRANSCRIPT_MAX = 300000;
 
 // Starters for the instructions box. Each one INSERTS editable text: nothing is
 // hidden, what is in the box is exactly what the AI receives.
@@ -59,6 +61,16 @@ export default function MediaInput({ onProcess, isProcessing }) {
     // are usually about one video, and a remembered "only moments about pricing"
     // would quietly narrow the next, unrelated one. Presets cover recurring styles.
     const [clipInstructions, setClipInstructions] = useState('');
+    // A transcript the user already has (YouTube's transcript panel, SRT/VTT):
+    // the job then never transcribes the whole video. Per video, never persisted.
+    const [useTranscript, setUseTranscript] = useState(false);
+    const [transcript, setTranscript] = useState('');
+    const transcriptBlocked = useTranscript && (!transcript.trim() || transcript.length > TRANSCRIPT_MAX);
+    const loadTranscriptFile = (e) => {
+        const picked = e.target.files?.[0];
+        e.target.value = '';
+        if (picked) picked.text().then(setTranscript).catch(() => {});
+    };
     const addInstructionPreset = (text) => {
         setClipInstructions((current) => {
             if (current.includes(text)) return current;
@@ -108,7 +120,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
 
     const handleSubmit = (e) => {
         e.preventDefault();
-        if (!acknowledged) return;
+        if (!acknowledged || transcriptBlocked) return;
         const advanced = {
             targetClips: targetClips || null,
             clipMinSeconds: clipMinSeconds || null,
@@ -117,6 +129,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
             autoHookStyle,
             layout,
             clipInstructions: clipInstructions.trim() || null,
+            transcript: useTranscript && transcript.trim() ? transcript : null,
         };
         try {
             localStorage.setItem('os_auto_hook', autoHook ? '1' : '0');
@@ -306,6 +319,50 @@ export default function MediaInput({ onProcess, isProcessing }) {
                     </div>
                 </div>
 
+                {/* A transcript the user already has — optional; skips transcribing the whole video */}
+                <div className="mt-4">
+                    <label className="flex items-center gap-2 text-xs text-ink2 cursor-pointer select-none">
+                        <input
+                            type="checkbox"
+                            checked={useTranscript}
+                            onChange={(e) => setUseTranscript(e.target.checked)}
+                            className="w-4 h-4 shrink-0 accent-[var(--color-accent)] cursor-pointer"
+                        />
+                        I have the transcript · skip transcribing the whole video
+                    </label>
+                    {useTranscript && (
+                        <div className="mt-2 animate-fade">
+                            <textarea
+                                value={transcript}
+                                onChange={(e) => setTranscript(e.target.value)}
+                                rows={6}
+                                className="input-field text-xs font-mono"
+                                placeholder={'0:00\nso today I want to talk about…\n0:04\nwhy most people get it wrong\n\nor an SRT / VTT caption file'}
+                                aria-label="transcript"
+                            />
+                            <div className="mt-1.5 flex items-start justify-between gap-3">
+                                <p className="text-left text-[11px] leading-relaxed text-muted">
+                                    YouTube: description → Show transcript → copy the list with its times.
+                                    SRT and VTT caption files work too. The transcript chooses the moments;
+                                    only the chosen clips get transcribed, for exact cuts and captions.
+                                </p>
+                                <span className={`readout shrink-0 ${transcript.length > TRANSCRIPT_MAX ? 'text-danger' : ''}`}>
+                                    {transcript.length.toLocaleString()}/{TRANSCRIPT_MAX.toLocaleString()}
+                                </span>
+                            </div>
+                            <label className="btn-quiet !px-2.5 !py-1 !text-xs mt-2 inline-flex cursor-pointer">
+                                load a caption file
+                                <input
+                                    type="file"
+                                    accept=".srt,.vtt,.txt,.json"
+                                    onChange={loadTranscriptFile}
+                                    className="hidden"
+                                />
+                            </label>
+                        </div>
+                    )}
+                </div>
+
                 {/* Advanced generation controls — collapsed by default; blank = AI decides */}
                 <div className="mt-4">
                     <button
@@ -433,7 +490,8 @@ export default function MediaInput({ onProcess, isProcessing }) {
 
                 <button
                     type="submit"
-                    disabled={isProcessing || !acknowledged || (mode === 'url' && !url) || (mode === 'file' && !file)}
+                    disabled={isProcessing || !acknowledged || transcriptBlocked
+                        || (mode === 'url' && !url) || (mode === 'file' && !file)}
                     className="w-full btn-primary mt-4"
                 >
                     {isProcessing ? (

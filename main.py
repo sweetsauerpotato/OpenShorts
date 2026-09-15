@@ -36,6 +36,8 @@ from clip_selection import (build_transcript_windows, clip_count_targets,
                             gemini_overload_budget)
 from ffmpeg_utils import (video_encode_args, audio_encode_args, QUALITY,
                           QUALITY_FAST, METADATA_SCRUB)
+from transcript_import import (clip_ranges, coverage_note, format_clock,
+                               merge_exact_words, transcript_misfit)
 from dotenv import load_dotenv
 import json
 
@@ -1872,6 +1874,89 @@ def agent_transcript_metadata(transcript, input_video, output_format, duration):
     }
 
 
+# --- A pasted transcript: exact words only where the clips are ------------
+def transcribe_range(input_video, start, end, video_duration, language=None):
+    """Whisper on [start, end] of the video: segments with the video's times.
+
+    A word the range edge cuts in half is dropped; the padding around every
+    clip keeps the cut itself away from the edges.
+    """
+    import tempfile
+    from transcribe_backends import transcribe_media
+
+    fd, wav_path = tempfile.mkstemp(suffix=".wav", prefix="range_")
+    os.close(fd)
+    try:
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error",
+                        "-ss", f"{start:.3f}", "-to", f"{end:.3f}", "-i", input_video,
+                        "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wav_path],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                       timeout=900)
+        part = transcribe_media(wav_path, language=language)
+    finally:
+        if os.path.exists(wav_path):
+            os.remove(wav_path)
+
+    length = end - start
+    at_start, at_end = start <= 0.0, end >= video_duration - 0.05
+    segments = []
+    for seg in part.get("segments") or []:
+        words = [{"word": w["word"], "start": round(float(w["start"]) + start, 3),
+                  "end": round(float(w["end"]) + start, 3)}
+                 for w in seg.get("words") or []
+                 if (at_start or float(w["start"]) >= 0.2)
+                 and (at_end or float(w["end"]) <= length - 0.2)]
+        if words:
+            segments.append({"start": words[0]["start"], "end": words[-1]["end"],
+                             "text": seg.get("text") or "", "words": words})
+    return segments
+
+
+def refine_pasted_transcript(input_video, transcript, clips, video_duration):
+    """Exact words for the chosen clips of a transcript the user pasted in.
+
+    The pasted transcript chose the clips, but its word times are estimates:
+    YouTube's panel copy is accurate to the second, and replaying 82 saved clip
+    answers on such times cut off the last word of 33-43% of the clips
+    (15-sep-2026). Whisper on the clips alone, 8 s either side (13-19% of the
+    video on two real jobs), replaces those words, and every clip is cut again
+    on them. Returns the transcript to keep; ``clips`` are updated in place.
+    """
+    if (transcript or {}).get("origin") != "pasted" or not clips:
+        return transcript
+    ranges = clip_ranges([(c["start"], c["end"]) for c in clips], video_duration)
+    covered = sum(hi - lo for lo, hi in ranges)
+    print(f"🎙️ Transcribing only the chosen clips: {len(ranges)} stretch(es), "
+          f"{covered / 60:.1f} of {video_duration / 60:.1f} min.")
+    exact, done = [], []
+    for lo, hi in ranges:
+        try:
+            exact += transcribe_range(input_video, lo, hi, video_duration,
+                                      language=transcript.get("language"))
+            done.append((lo, hi))
+        except Exception as e:
+            print(f"   ⚠️ Could not transcribe {format_clock(lo)}-{format_clock(hi)} "
+                  f"({type(e).__name__}: {e}); clips there keep the pasted timing.")
+    if not done:
+        return transcript
+
+    refined = merge_exact_words(transcript, exact, done)
+    words = [{'w': w['word'], 's': w['start'], 'e': w['end']}
+             for seg in refined['segments'] for w in seg.get('words', [])]
+    spans = sentence_spans(words)
+    min_secs, max_secs = clip_duration_bounds()
+    for n, clip in enumerate(clips, 1):
+        old = (float(clip['start']), float(clip['end']))
+        ns, ne = snap_clip_to_sentences(old[0], old[1], words, video_duration,
+                                        min_duration=min_secs, max_duration=max_secs,
+                                        spans=spans)
+        if abs(ns - old[0]) > 0.05 or abs(ne - old[1]) > 0.05:
+            print(f"   ✂️ Clip {n}: start {ns - old[0]:+.1f}s, end {ne - old[1]:+.1f}s "
+                  f"on the exact words.")
+        clip['start'], clip['end'] = ns, ne
+    return refined
+
+
 def get_visual_clips(video_path, video_duration, language="en", instructions=None):
     """Clip a SILENT video by vision: Gemini watches the footage and picks the
     most engaging visual moments (no transcript). Returns the same
@@ -2100,15 +2185,28 @@ if __name__ == '__main__':
         # with the file falls back to transcribing normally rather than failing.
         if args.transcript:
             try:
-                with open(args.transcript, 'r') as f:
+                with open(args.transcript, 'r', encoding='utf-8') as f:
                     transcript = json.load(f)
                 if not transcript.get('segments'):
                     raise ValueError("transcript has no segments")
-                print(f"⏩ Reusing precomputed transcript "
-                      f"({len(transcript['segments'])} segments) — skipping transcription.")
+                if transcript.get('origin') != 'pasted':  # a pasted one says so below
+                    print(f"⏩ Reusing precomputed transcript "
+                          f"({len(transcript['segments'])} segments) — skipping transcription.")
             except Exception as e:
                 print(f"⚠️ Could not use precomputed transcript ({e}) — transcribing normally.")
                 transcript = None
+        if (transcript or {}).get('origin') == 'pasted':
+            # The user's own transcript: transcribing anyway is exactly what they
+            # asked us not to do, and one for another video would yield clips of
+            # the wrong words. Fail instead of guessing.
+            misfit = transcript_misfit(transcript, duration)
+            if misfit:
+                raise RuntimeError(misfit)
+            note = coverage_note(transcript, duration)
+            if note:
+                print(f"⚠️ {note}")
+            print(f"📝 Using the transcript you provided ({transcript.get('timing')} timing): "
+                  f"it chooses the clips; only the chosen clips get transcribed.")
         if transcript is None:
             transcript = load_transcript_checkpoint(output_dir, input_video, duration)
             if transcript is not None:
@@ -2159,6 +2257,11 @@ if __name__ == '__main__':
                 "Clip detection failed — Gemini did not return usable clips for this video.")
         else:
             print(f"🔥 Found {len(clips_data['shorts'])} clips!")
+
+            # A pasted transcript chose the clips on estimated word times: get
+            # the real ones where the clips are, and cut again on them.
+            transcript = refine_pasted_transcript(
+                input_video, transcript, clips_data['shorts'], duration)
 
             # Save metadata. Silent videos have no transcript → no subtitles,
             # which is correct (there's no speech to caption).

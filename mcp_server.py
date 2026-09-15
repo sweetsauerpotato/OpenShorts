@@ -156,6 +156,17 @@ TOOLS = [
                                    "fewer clips come back when few moments fit. Cannot change clip "
                                    "length rules.",
                 },
+                "transcript": {
+                    "type": "string", "maxLength": 300000,
+                    "description": "Optional: the video's transcript WITH its timestamps, when the user "
+                                   "has one, passed exactly as they gave it. Accepted: YouTube's 'Show "
+                                   "transcript' list copied as is ('1:02' then the words), SRT, WebVTT "
+                                   "(YouTube's auto-caption VTT too), or OpenShorts transcript JSON. "
+                                   "The whole video is then never transcribed: the clips are chosen "
+                                   "from this transcript and only the chosen clips are transcribed, "
+                                   "for exact cuts and captions. A transcript without timestamps is "
+                                   "rejected.",
+                },
                 "selection": {
                     "type": "string", "enum": ["ai", "agent"],
                     "description": "Who chooses the clips. 'ai' (default): OpenShorts picks and renders "
@@ -383,7 +394,7 @@ async def _tool_process_video(client, args):
         "webhook_secret": args.get("webhook_secret"),
     }
     for k in ("target_clips", "clip_min_seconds", "clip_max_seconds", "captions", "quality",
-              "clip_instructions", "selection"):
+              "clip_instructions", "selection", "transcript"):
         if args.get(k) is not None:
             body[k] = args[k]
     # Same default as the dashboard: hook on unless the caller opts out. The
