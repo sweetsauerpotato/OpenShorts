@@ -178,10 +178,22 @@ decision and not non-speech. Those words are the punch landing and "Welcome to
 team 11", and their absence is why Gemini ended its own clip at 745.77: the
 scorer cannot pick a moment it cannot read.
 
-Measured over the 23.6-min video: **36 gaps of >= 2 s (370 s, 26% of the
-runtime)**, and re-transcribing them recovers **478 words on a 3,566-word
-transcript (+13.4%)** for **114 s of CPU**. The democracy source has 26 gaps
-(140 s, 4.7%), so the share is material but very video-dependent.
+**How much is missing is a property of the RUN, not of the video** (corrected
+16-sep after a second run). The same file through the same pipeline, same
+settings (whisper/small/cpu/int8, all env defaults):
+
+    run A   3,566 words   266 segments   36 gaps >= 2 s   370 s
+    run B   4,125 words   183 segments   17 gaps >= 2 s   133 s
+
+Run B's holes are a strict SUBSET of run A's -- 13 shared, 23 only in A, none
+only in B -- so the two runs do not fail in different places: one simply
+dropped more. The 13 shared holes are the real music and montage stretches.
+A bad run therefore loses 15.7% of the words a good run gets, and which run you
+draw is luck. Repair is a robustness net that pulls a bad run back up: on the
+live job below it added 417 words to a 3,566-word draw, reaching 3,983 against
+the good run's 4,125.
+
+Re-transcribing costs ~114 s of CPU for 370 s of hole on a 23.6-min video.
 
 **A hole is where the music is, and that is the whole difficulty.** Naive
 repair returns song lyrics as dialogue — "All my new friends, all my fake
@@ -206,6 +218,17 @@ merged a lyric with real speech and no verdict can be right, and 2 harmless
 drops of repetitive interjections. `GEMINI_MODEL_HOLE_GATE` overrides the
 model; `gemini-3.7-flash` could not be measured against flash-lite (503 for the
 full 180 s retry budget, twice).
+
+**It changes what gets picked, which is the point.** Live, same video and
+instructions, on a job that drew the bad 3,566-word transcription
+(16-sep-2026): the body-shot moment was cut at **729.09-745.77 (16.7 s, score
+80)** without repair -- ending before the punch lands, because the words after
+746.73 were not in the transcript to read -- and at **729.09-756.98 (27.9 s,
+score 90)** with it, carrying through to "Dude, you're on the team now". The
+run that drew the good transcription unaided cut it at 728.94-758.59 (29.6 s,
+score 92), so repair brought a bad draw to within 1.6 s of a good one. Pass 1
+cannot score what it cannot read; this is the cheapest way to let it read more.
+Cost was unchanged ($0.0082 vs $0.0092).
 
 **Every failure keeps today's transcript.** No key, an unparseable answer, an
 unknown verdict, a 503 that outlasts the budget — all return "keep nothing".

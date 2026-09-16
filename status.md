@@ -11,7 +11,7 @@ verified.
 Goal: give Claude a link in chat and get clips back, with Claude choosing the
 moments instead of Gemini (MCP). Steps 1-4 and **3.5 are done** and work end to
 end through `/mcp`. **Nothing below is pushed**: 10 local commits,
-`672c4d5`..`6d63ccb`.
+`672c4d5`..`e9a432f`.
 
 3.5 was run on the Jake Paul video (23.6 min) on 16-sep-2026: Gemini's 6 clips
 (job `216fe922`) against Claude's 5 (job `01e40a09`), same source, same
@@ -39,6 +39,43 @@ mid-session and the cached copy is the only one left. The render job
 free it) and works as a `source_job_id`.
 
 ---
+
+## 2026-09-16 — `e9a432f` docs: the hole measurement was run-dependent, and repair changes what Gemini picks
+
+**What**: corrects the numbers recorded for `6d63ccb` and adds the end-to-end
+result. No behaviour change.
+
+**The correction**: "36 gaps, 370 s, 26% of the runtime, +13.4% of words" was
+measured on ONE transcription run and stated as a property of the video. It is
+not. The same file through the same pipeline and settings:
+
+    run A   3,566 words   266 segments   36 gaps >= 2 s   370 s
+    run B   4,125 words   183 segments   17 gaps >= 2 s   133 s
+
+Run B's holes are a strict subset of run A's (13 shared, 23 only in A, **0 only
+in B**), so the runs do not fail in different places — one dropped more. A bad
+draw loses 15.7% of the words a good draw gets, and which one you get is luck.
+The 13 shared holes are the real music and montage stretches. So this is a
+robustness net against a bad run, not a fix for a systematic loss.
+
+**The result worth having**: a full job with `REPAIR_HOLES=1` drew the bad
+transcription (3,566 words exactly) and repair took it to 3,983 — against the
+good run's 4,125. What that changed:
+
+    bad transcript, no repair    body shot 729.09-745.77  16.7 s  score 80
+    bad transcript + repair      body shot 729.09-756.98  27.9 s  score 90
+    good transcript, no repair   body shot 728.94-758.59  29.6 s  score 92
+
+Same video, same instructions. Gemini extended its own clip by 11.2 s and
+raised its own score once the words existed — the moment that had to be
+hand-picked in the 3.5 head-to-head. Cost unchanged ($0.0082 vs $0.0092).
+Repair left 27 holes (241 s) alone, and the known false keep (a Rick Ross
+verse at 991-1003 s) survived into the transcript, though no clip used it.
+
+**Files**: `CLAUDE.md`, `status.md`.
+
+**Verified**: live job `367946a9`, 6 clips, same source and instructions as the
+control job `6bf64b65` the user ran from the dashboard.
 
 ## 2026-09-16 — `6d63ccb` feat(transcript): recover the speech the whole-video pass drops
 
