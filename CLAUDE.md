@@ -168,6 +168,53 @@ sent: bursts of 3-6 consecutive 503s used to fail the job and now recover.
 `get_visual_clips` (silent video) and the layout picker make their own
 single-attempt calls and do not use this loop.
 
+### Speech the whole-video pass dropped (`transcript_holes.py`, `REPAIR_HOLES=1`)
+
+A whole-video Whisper pass silently loses stretches of ordinary speech. On the
+Jake Paul source it emitted **no segment at all** between 746.73 and 760.97 s,
+jumping from one to the next, although re-transcribing those 14 s alone returns
+90 words — identically with `vad_filter` on and off, so it is not a VAD
+decision and not non-speech. Those words are the punch landing and "Welcome to
+team 11", and their absence is why Gemini ended its own clip at 745.77: the
+scorer cannot pick a moment it cannot read.
+
+Measured over the 23.6-min video: **36 gaps of >= 2 s (370 s, 26% of the
+runtime)**, and re-transcribing them recovers **478 words on a 3,566-word
+transcript (+13.4%)** for **114 s of CPU**. The democracy source has 26 gaps
+(140 s, 4.7%), so the share is material but very video-dependent.
+
+**A hole is where the music is, and that is the whole difficulty.** Naive
+repair returns song lyrics as dialogue — "All my new friends, all my fake
+friends" (400.9 s), Fortunate Son (1194.6 s), a Rick Ross verse (963.2 s) —
+which would be burned into captions and fed to the scorer. Whisper's own
+signals cannot separate them, measured against hand labels:
+
+    lyrics  400.9   no_speech_prob 0.019 (lowest of all)   avg_logprob -0.423
+    lyrics  963.2   no_speech_prob 0.204   avg_logprob -0.236 (best of all)
+    speech    8.9   no_speech_prob 0.366 (highest of all)  avg_logprob -0.519
+    speech  746.7   no_speech_prob 0.083   avg_logprob -0.403
+
+The two most confident-looking rows are both music — the same failure the
+layout picker documents from four earlier attempts at a continuous measure. So
+the filter asks for a **closed choice** instead (`HOLE_GATE_PROMPT_TEMPLATE`,
+one text-only call through `llm_provider`, so a local Ollama serves it too):
+each recovered fragment is `dialogue` / `music` / `noise`, gated **per Whisper
+segment** rather than per hole so a mixed stretch is judged in coherent pieces.
+Measured on 69 fragments with flash-lite, 6.8 s: 60 kept, **1 genuine false
+keep** ("I'm in the distribution. I'm like Atlanta"), 1 segment where Whisper
+merged a lyric with real speech and no verdict can be right, and 2 harmless
+drops of repetitive interjections. `GEMINI_MODEL_HOLE_GATE` overrides the
+model; `gemini-3.7-flash` could not be measured against flash-lite (503 for the
+full 180 s retry budget, twice).
+
+**Every failure keeps today's transcript.** No key, an unparseable answer, an
+unknown verdict, a 503 that outlasts the budget — all return "keep nothing".
+A dropped line only leaves the transcript as it already is; a kept lyric gets
+published on screen. Off unless `REPAIR_HOLES=1`. A pasted transcript is
+skipped (its gaps are line gaps, and `refine_pasted_transcript` already puts
+exact words where the clips are), and the repair runs **before** the transcript
+checkpoint so a resumed job does not redo the CPU.
+
 ### Pasted transcripts (`transcript_import.py`)
 
 `transcript` on `/api/process` (dashboard: the "I have the transcript" box;
@@ -275,6 +322,7 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 | `clip_selection.py` | Stdlib-only clip-selection helpers: windows, shortlist, sentence cuts, creator instructions, Gemini retry policy, model prices |
 | `tools/compare_selection.py` | Harness that measures clip selection on a cached transcript (see "How clips are chosen") |
 | `transcript_import.py` | Stdlib-only reader for pasted transcripts (YouTube panel, SRT, VTT, JSON) and the clip-range merge of exact words (see "Pasted transcripts") |
+| `transcript_holes.py` | Stdlib-only: the gaps a whole-video Whisper pass dropped, and the closed-choice gate that keeps song lyrics out of what comes back |
 | `agent_clips.py` | Stdlib-only validation of the clips an agent sends (render_clips) and where their piece edges land |
 | `app.py` | FastAPI server with async job queue and REST endpoints |
 | `editor.py` | Gemini AI integration for dynamic video effects (FFmpeg filter generation) |

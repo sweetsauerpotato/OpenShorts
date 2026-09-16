@@ -30,6 +30,15 @@ class ScoreResponse(BaseModel):
     windows: List[ScoredWindowModel]
 
 
+class HoleFragmentModel(BaseModel):
+    id: int
+    kind: str
+
+
+class HoleGateResponse(BaseModel):
+    fragments: List[HoleFragmentModel]
+
+
 class DetailClipModel(BaseModel):
     start: float
     end: float
@@ -252,6 +261,51 @@ Return only:
       "score": <integer 0-100>,
       "reason": "<very short reason>"
     }}
+  ]
+}}
+"""
+
+# Re-transcribing the stretches a whole-video Whisper pass dropped also
+# transcribes the music that lives in them: song lyrics came back as dialogue
+# from 3 of the 26 holes that returned words. Whisper's own no_speech_prob and
+# avg_logprob do not separate the two (the two most confident-looking rows in
+# that measurement were both lyrics), so this asks for a closed choice instead.
+# Deliberately blind to timing and to the surrounding transcript: the judgement
+# is about the words themselves, and a fragment that needs context to defend is
+# one we are better off dropping.
+HOLE_GATE_PROMPT_TEMPLATE = """
+You are cleaning up an automatic transcript of a video.
+
+Each fragment below was recovered from a stretch the first transcription pass
+left empty. Those stretches are where background music usually sits, so some
+fragments are SONG LYRICS that the recogniser wrote down as if somebody had
+said them. Your job is to tell those apart from real speech.
+
+Classify EVERY fragment, one entry per id, in the order given:
+- "dialogue": somebody in the video is speaking, shouting, reacting or joking.
+  Interruptions, swearing, half-sentences and crosstalk are all dialogue.
+- "music": sung lyrics, a rap verse, a chorus, a jingle, or a line you
+  recognise from a song.
+- "noise": not words at all -- transcription garbage, a single stray syllable,
+  or text that means nothing.
+
+Rules:
+- Return only valid JSON.
+- When a fragment could be either, answer "music". A wrongly kept lyric gets
+  published on screen; a wrongly dropped line only leaves the transcript as it
+  already is.
+- Rhyming, a repeated refrain, a steady metre, or second-person love/party
+  lines are lyrics even when they read like plain sentences.
+- Judge only the words in the fragment. Do not use its length or its id.
+
+TRANSCRIPT_LANGUAGE: {language}
+FRAGMENTS_JSON:
+{fragments_json}
+
+Return only:
+{{
+  "fragments": [
+    {{ "id": <integer>, "kind": "dialogue" | "music" | "noise" }}
   ]
 }}
 """

@@ -26,6 +26,7 @@ from google.genai import types as genai_types
 import gemini_worker
 import layout_picker
 import llm_provider
+import transcript_holes
 from clip_selection import (build_transcript_windows, clip_count_targets,
                             clip_duration_bounds, sentence_spans,
                             snap_clip_to_sentences,
@@ -1890,6 +1891,94 @@ def agent_transcript_metadata(transcript, input_video, output_format, duration):
     }
 
 
+# --- Speech the whole-video pass dropped ---------------------------------
+def gate_recovered_fragments(fragments, language):
+    """Which recovered fragments are speech and not song lyrics.
+
+    One text-only closed-choice call through llm_provider, so a local Ollama
+    serves it as well as Gemini. Any failure returns "keep nothing": the
+    transcript we already have is always a safe answer, while a kept lyric ends
+    up burned on screen. See transcript_holes for why no measurable signal can
+    do this instead.
+    """
+    payload = [{"id": i, "text": (f.get("text") or "").strip()[:300]}
+               for i, f in enumerate(fragments)]
+    try:
+        client, model_name = llm_provider.make_client()
+        # Tunable without a code change, like GEMINI_MODEL_THUMBNAIL. Left at
+        # GEMINI_MODEL by default: flash-lite answered 69 fragments in 6.8 s
+        # with 1 genuine miss, and gemini-3.7-flash could not be measured
+        # against it (503 for the full 180 s retry budget, twice). Ignored on a
+        # local run, where the model name is an Ollama one.
+        override = os.environ.get("GEMINI_MODEL_HOLE_GATE", "").strip()
+        if override and not str(model_name).startswith("ollama/"):
+            model_name = override
+        parsed, _cost = _run_gemini_stage(
+            client, model_name,
+            gemini_worker.HOLE_GATE_PROMPT_TEMPLATE.format(
+                language=language or "unknown",
+                fragments_json=json.dumps(payload, ensure_ascii=False)),
+            gemini_worker.HoleGateResponse)
+    except Exception as e:
+        print(f"   ⚠️ Could not tell speech from lyrics ({type(e).__name__}: "
+              f"{str(e)[:120]}) — keeping the transcript as it was.")
+        return [False] * len(fragments)
+    return transcript_holes.parse_gate(parsed, len(fragments))
+
+
+def repair_transcript_holes(input_video, transcript, video_duration):
+    """Re-transcribe the stretches the whole-video pass left empty.
+
+    Off unless REPAIR_HOLES=1, like every other new signal here. A pasted
+    transcript is skipped: its gaps are line gaps, and refine_pasted_transcript
+    already puts exact words where the clips are.
+    """
+    if os.environ.get("REPAIR_HOLES", "0").strip() != "1":
+        return transcript
+    if not transcript or (transcript.get("origin") == "pasted"):
+        return transcript
+
+    holes = transcript_holes.find_holes(transcript)
+    if not holes:
+        return transcript
+    total = sum(b - a for a, b in holes)
+    print(f"🩹 Re-transcribing {len(holes)} gap(s) the first pass left empty "
+          f"({total:.0f}s of {video_duration:.0f}s)…")
+
+    language = transcript.get("language") or None
+    recovered = []
+    for a, b in holes:
+        try:
+            segments = transcribe_range(
+                input_video, max(0.0, a - transcript_holes.HOLE_PAD),
+                min(video_duration, b + transcript_holes.HOLE_PAD),
+                video_duration, language=language)
+        except Exception as e:
+            print(f"   ⚠️ {a:.1f}-{b:.1f}s failed ({type(e).__name__}) — left empty.")
+            continue
+        for seg in segments:
+            words = transcript_holes.words_in([seg], a, b)
+            if words:
+                recovered.append({
+                    "start": words[0]["start"], "end": words[-1]["end"],
+                    "text": "".join(w["word"] for w in words).strip(),
+                    "words": words})
+
+    fragments = transcript_holes.worth_gating(recovered)
+    if not fragments:
+        print("   Nothing usable came back.")
+        return transcript
+
+    verdicts = gate_recovered_fragments(fragments, language)
+    kept = [f for f, ok in zip(fragments, verdicts) if ok]
+    dropped = len(fragments) - len(kept)
+    words = sum(len(f["words"]) for f in kept)
+    before = len(transcript_holes.transcript_words(transcript))
+    print(f"   +{words} words in {len(kept)} stretch(es) "
+          f"({before} → {before + words}); {dropped} dropped as music or noise.")
+    return transcript_holes.merge_recovered(transcript, kept)
+
+
 # --- A pasted transcript: exact words only where the clips are ------------
 def transcribe_range(input_video, start, end, video_duration, language=None):
     """Whisper on [start, end] of the video: segments with the video's times.
@@ -2321,6 +2410,8 @@ if __name__ == '__main__':
         if transcript is None:
             try:
                 transcript = transcribe_video(input_video)
+                # Before the checkpoint: a resumed job must not redo this.
+                transcript = repair_transcript_holes(input_video, transcript, duration)
                 save_transcript_checkpoint(output_dir, transcript, input_video, duration)
             except NoAudioError as e:
                 print(f"🔇 {e} — switching to visual analysis.")
