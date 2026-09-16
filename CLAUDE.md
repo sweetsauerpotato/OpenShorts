@@ -784,23 +784,37 @@ new `niches/*.md` appears in the picker with its own chips and **no frontend
 deploy** — the reason the criteria are files at all. A malformed line costs one
 chip, never the dropdown: these are edited by hand.
 
-**A starter has to ask for something the layers below cannot already do.** The
-first set failed that and was replaced: `skip promo` restated `clip_rules.md`'s
-Never list *and* both niches' Skip sections, so ticking it changed nothing, and
-`contradictions` / `numbers & names` / `how it works` were the `tech_podcast`
-criteria typed out a second time. A starter that changes nothing teaches the
-user the box does not work. So every one now **narrows** the criteria (`only`
-one of the niche's nine signals, which is real because the box is a hard limit
-and the niche is guidance) or **overrides** them — `creator_chaos`'s
-`advertiser safe` contradicts its own "keep the crosstalk and the swearing:
-that is the texture". Tests pin both: every shipped starter opens with
-only/skip/keep/never/return/ignore, and none of them mentions sponsors or
-subscribes again.
+**A starter has to ask for something the layers below cannot already do**, and
+there are exactly two ways. **Narrowing** is one: `clip_rules.md` and a niche
+both list many things that make a moment work, as *guidance*, and the box is a
+*hard limit* — so "only the disagreements" really does change the job even
+though disagreement is already on the list. **Overriding** is the other;
+`creator_chaos`'s `advertiser safe` contradicts that niche's own "keep the
+crosstalk and the swearing: that is the texture".
 
-The four **general** starters stay in `MediaInput.jsx` because no file could
-own them: they are about THIS video — its subject, its timeline, who is in it,
-how many clips are wanted — and three carry a `[PLACEHOLDER]` the user fills,
-which the box warns about while it is still there, since it is sent verbatim.
+What does not belong is a starter that **adds a rule already in force**. That
+was `skip promo`: it asked for sponsor reads and subscribe pitches to be
+skipped, which `clip_rules.md`'s Never list and both niches' Skip sections
+already do. Ticking it changed nothing, which teaches the user the box does not
+work. It is the only one of the original seven that failed the test — the
+angles (`contradictions`, `numbers & names`, `disagreement`, `reactions`,
+`stories`, `how it works`) are narrowings and were restored, at roughly double
+the length: each now names the **near-miss** the model would otherwise grab and
+**where to put the cut**, because a vague preset lets it fall back on its own
+taste and return what it would have anyway. 285-323 characters each, so three
+of the longest stack to 940 of the box's 1000 and a fourth is skipped whole
+rather than truncated.
+
+The **general** row also carries four starters about THIS video — its subject,
+its timeline, who is in it, how many clips are wanted — which is why no niche
+file could own them; three take a `[PLACEHOLDER]` the box warns about while it
+is unfilled, since it is sent verbatim. A **niche** row then adds only what
+makes no sense outside that kind of video (`keep the question`, `the
+prediction`, `advertiser safe`, `no reaction content`), because a niche chip
+repeating a general angle is a duplicate on screen. Tests pin the shape: every
+shipped niche starter opens with only/skip/keep/never/return/ignore, and none
+of them mentions sponsors or subscribes again.
+
 The picker moved out of advanced options and above the box: it now decides both
 the criteria and which chips appear, so it has to be visible.
 

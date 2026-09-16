@@ -81,14 +81,21 @@ creator and the specific thing that happened, never generic spam.
 
 <!-- Prompt STARTERS for the dashboard box, not criteria. This section is
      stripped before the niche is sent, so nothing here reaches the model twice.
-     Each one must NARROW or OVERRIDE the rules above -- "only X", "never Y", a
-     different audience, a different length. A starter that restates a rule
-     already in this file or in clip_rules.md changes nothing when it is
-     ticked, and only teaches the user that the box does not work. Format:
-     "- short label: the text that goes in the box". -->
+     Each one must NARROW the rules above ("only" one of the signals they list,
+     which is a real change because they are guidance and the box is a hard
+     limit) or OVERRIDE them. What does NOT belong is a starter that ADDS a
+     rule already in force -- "skip the sponsor reads" when clip_rules.md and
+     the Skip section above both ban them already. It changes nothing when it
+     is ticked, and only teaches the user that the box does not work.
 
-- only the reaction: Only moments where someone actually reacts — screaming, losing it, going silent, a room turning. Skip anything that is only people talking, however funny the words are.
-- only when something happens: Only moments where something physically happens: the hit, the crash, the reveal, the thing arriving. The talking around it is not the clip.
-- only the wind-up: Only roasts, arguments and wind-ups between people who know each other. Skip commentary said alone to camera.
+     Keep to what makes no sense OUTSIDE this kind of video. The angles that
+     work anywhere -- contradictions, numbers, disagreement, reactions,
+     stories, how-it-works -- are the dashboard's general row, and a chip that
+     repeats one of those is a duplicate on screen.
+
+     Format: "- short label: the text that goes in the box". -->
+
+- only when something happens: Only moments where something physically happens: the hit, the crash, the reveal, the thing arriving. The talking around it is not the clip — open as late as you can and stay in the action.
+- only the wind-up: Only roasts, arguments and wind-ups between people who know each other. Skip commentary said alone to camera, and skip a joke nobody responds to.
 - advertiser safe: Skip any moment containing swearing or slurs, even a strong one. This has to be safe to run ads against.
-- no reaction content: Skip moments that are a reaction to someone else's video. Only what happens in this room.
+- no reaction content: Skip moments that are a reaction to someone else's video or a clip played on screen. Only what happens in this room.

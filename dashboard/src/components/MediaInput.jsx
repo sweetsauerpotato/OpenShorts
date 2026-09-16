@@ -15,18 +15,37 @@ const TRANSCRIPT_MAX = 300000;
 // Starters for the instructions box. Each one INSERTS editable text: nothing is
 // hidden, what is in the box is exactly what the AI receives.
 //
-// A starter has to ask for something the layers below CANNOT already do. The
-// set before this one failed that test: "skip promo" restated clip_rules.md's
-// Never list *and* both niches' Skip sections, so ticking it changed nothing,
-// and the rest ("contradictions", "numbers", "how it works") were the
-// tech_podcast criteria typed out a second time. A starter that changes
-// nothing teaches the user the box does not work.
+// A starter has to ask for something the layers below CANNOT already do, and
+// there are two ways to do that. NARROWING is one: clip_rules.md and a niche
+// both list many things that make a moment work, as guidance, and the box is a
+// hard limit — so "only the disagreements" really does change the job, even
+// though disagreement is already on the list. OVERRIDING is the other.
 //
-// So these are the ones that belong to no niche, because no file could hold
-// them: they are about THIS video — its subject, its timeline, who is in it,
-// how many clips are wanted. The per-niche starters come from the niche files
-// (GET /api/niches), where they sit under the rules they narrow.
+// What does NOT belong is a starter that ADDS a rule already in force: the old
+// "skip promo" asked for sponsor reads and subscribe pitches to be skipped,
+// which clip_rules.md's Never list and both niches already do. Ticking it
+// changed nothing, which teaches the user the box does not work.
+//
+// The first six are angles: what KIND of moment to keep. Each names the
+// near-miss the model would otherwise grab, and where to put the cut, because
+// a vague preset lets it fall back on its own taste and return what it would
+// have anyway. The last four are about THIS video — its subject, its timeline,
+// who is in it, how many clips are wanted — which is why no niche file could
+// hold them. Per-niche starters come from the niche files (GET /api/niches)
+// and cover only what makes no sense outside that kind of video.
 const GENERAL_PRESETS = [
+    { label: 'contradictions',
+      text: 'Only moments where someone says something most people would disagree with, stated plainly rather than hinted at. The test: a stranger would argue back in the comments. Skip agreement and mild surprise. Open on the sentence where the claim is at its strongest, and keep the reason that follows it.' },
+    { label: 'numbers & names',
+      text: 'Only moments built on a specific figure or name — a price, a date, a percentage, a headcount, a named company or person — where the number is doing the work rather than decorating a general point. Skip round guesses like "millions" or "a ton", and advice with nothing verifiable in it. Open the clip on the figure.' },
+    { label: 'disagreement',
+      text: 'Only moments where two people actually disagree and both say why. Politeness that hides a split does not count, and neither does one objection that is dropped straight away. Open on the sentence where the split surfaces, not on the topic that led to it, and run until one of them answers it.' },
+    { label: 'reactions',
+      text: 'Only moments where someone genuinely reacts — laughing, shouting, swearing, going quiet, a word repeated fast, several people talking at once. In a transcript that looks like short broken lines, not full sentences. The reaction is the payoff: run past the last clean sentence into it, and never end where the talking stops.' },
+    { label: 'stories',
+      text: 'Only first-person stories with a turn: what they expected, then what actually happened to them. It needs a specific place, person or amount in it. Skip hypotheticals, general observations, and anecdotes that trail off. Open in the middle of the story, at the tension, not on the setup.' },
+    { label: 'how it works',
+      text: 'Only moments that explain how something actually works, start to finish, so a stranger could repeat it afterwards. Every term has to be defined inside the clip. Skip bare definitions, feature lists, and anything that needs an earlier answer to follow. End on what it means, not on the caveat after it.' },
     { label: 'only this topic',
       text: 'Only moments about [TOPIC]. Ignore everything else, even a strong moment.' },
     { label: 'skip the start',
