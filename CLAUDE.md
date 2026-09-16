@@ -572,6 +572,21 @@ under it.
     onset after a pause is where Whisper is least sure — two runs over the same
     audio placed "Those" at 148.32 s and 147.84 s (the waveform says 147.87),
     and a 0.3 s lead cut into the word.
+  - **A gap of 2 s or more is a hole, not a pause** (16-sep-2026,
+    `agent_clips.GAP_IS_A_HOLE`), and an edge the agent put inside one is kept
+    instead of being pulled back to the neighbouring word — it only stops a
+    full lead/tail clear of the word on the far side. The padding above assumes
+    a gap is silence; a hole is a stretch Whisper returned nothing for, which is
+    not the same thing. On the Jake Paul source the hole at 746.7-761.0 runs at
+    -17.5 to -27.9 dB RMS, louder than the speech around it: the punch landing,
+    the laughing and "Welcome to team 11". Snapping collapsed a clip's end from
+    760.60 to 747.13 and deleted the payoff — the same 14 s Gemini's
+    transcript-only scoring never saw. Only holes bounded by a word on both
+    sides qualify; past the first or last word the trim stays. The 2 s line is
+    where the two populations separate: over 3,566 and 8,440 words, gaps
+    >= 0.5 s number 68/272 and >= 2 s only 36/26, the collapse happening between
+    0.5 and 1 s. Replayed over the 13 pieces of a real 5-clip set, exactly 1
+    edge moved (+13.3 s) and the other 12 were unchanged.
   - **A pasted transcript** is carried onto the exact words first
     (`transcript_import.map_to_exact`, aligning the two transcripts' text), then
     snapped. `prefer` settles the tie where one word ends exactly where the next

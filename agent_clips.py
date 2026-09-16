@@ -33,6 +33,27 @@ MAX_REASON_CHARS = 500
 PIECE_LEAD = 0.5
 PIECE_TAIL = 0.4
 
+# A gap at least this long is not a pause between two words: it is a HOLE, a
+# stretch the transcriber returned nothing for. The distinction matters because
+# the padding above assumes a gap is silence, and a hole is not - on the Jake
+# Paul source (16-sep-2026) the 14.2 s hole at 746.7-761.0 runs at -17.5 to
+# -27.9 dB RMS, louder than the speech around it: it is the punch landing, the
+# laughing, and "Welcome to team 11". Whisper heard none of it. Pulling an edge
+# back out of a hole therefore throws content away, and it threw away the
+# payoff of the best clip of that video.
+#
+# 2.0 s is where the two populations separate. Inter-word gaps over two real
+# transcripts (3,566 and 8,440 words):
+#
+#     gap >=      0.5s    1.0s    1.5s    2.0s    3.0s    5.0s
+#     Jake Paul    68      45      38      36      28      19
+#     democracy   272      54      33      26      21      13
+#
+# Both collapse between 0.5 and 1.0 s - ordinary pauses - and flatten after
+# 1.5-2.0 s. Below the threshold the old trimming is kept, so a breath still
+# cuts tight.
+GAP_IS_A_HOLE = 2.0
+
 
 class AgentClipsError(ValueError):
     """Invalid clips: safe to show as a 400."""
@@ -114,6 +135,14 @@ def snap_edge(t, words, kind, max_lead=PIECE_LEAD, max_tail=PIECE_TAIL):
     inside a word goes to the nearer side of it, so a word is either whole in
     the piece or out of it; then it sits in the gap next to that word, at most
     ``max_lead``/``max_tail`` into the silence and never past the gap's middle.
+
+    Inside a hole (``GAP_IS_A_HOLE``) that rule is wrong - the gap is not known
+    to be silent - so an edge the caller put there deliberately is KEPT rather
+    than pulled back to the neighbouring word. It still stops a full
+    ``max_lead``/``max_tail`` clear of the word on the far side, so no
+    neighbouring word can become audible. Only a hole bounded by a word on both
+    sides qualifies: past the first or last word the transcript is no evidence
+    of anything, and trimming stays the safe default.
     """
     t = float(t)
     if not words:
@@ -132,7 +161,12 @@ def snap_edge(t, words, kind, max_lead=PIECE_LEAD, max_tail=PIECE_TAIL):
             return round(t, 3)
         word_start = float(words[first]["s"])
         gap = word_start - float(words[first - 1]["e"]) if first > 0 else 2 * max_lead
-        return round(max(0.0, word_start - min(max_lead, max(0.0, gap) / 2)), 3)
+        tight = word_start - min(max_lead, max(0.0, gap) / 2)
+        if inside is None and first > 0 and gap >= GAP_IS_A_HOLE and t < tight:
+            # Deliberately inside a hole: keep it, clear of the previous word.
+            floor = float(words[first - 1]["e"]) + max_tail
+            return round(max(0.0, min(tight, max(t, floor))), 3)
+        return round(max(0.0, tight), 3)
 
     if inside is not None:
         last = inside if float(words[inside]["e"]) - t <= t - float(words[inside]["s"]) else inside - 1
@@ -142,5 +176,11 @@ def snap_edge(t, words, kind, max_lead=PIECE_LEAD, max_tail=PIECE_TAIL):
     if last < 0:
         return round(t, 3)
     word_end = float(words[last]["e"])
-    gap = float(words[last + 1]["s"]) - word_end if last + 1 < len(words) else 2 * max_tail
-    return round(word_end + min(max_tail, max(0.0, gap) / 2), 3)
+    bounded = last + 1 < len(words)
+    gap = float(words[last + 1]["s"]) - word_end if bounded else 2 * max_tail
+    tight = word_end + min(max_tail, max(0.0, gap) / 2)
+    if inside is None and bounded and gap >= GAP_IS_A_HOLE and t > tight:
+        # Deliberately inside a hole: keep it, clear of the next word.
+        ceiling = float(words[last + 1]["s"]) - max_lead
+        return round(max(tight, min(t, ceiling)), 3)
+    return round(tight, 3)

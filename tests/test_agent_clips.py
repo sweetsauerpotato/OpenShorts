@@ -96,6 +96,46 @@ class TestSnapEdge:
         assert snap_edge(0.2, WORDS, "end") == 0.2                     # no word before it
         assert snap_edge(5.0, [], "end") == 5.0
 
+    # The real hole from the Jake Paul source (16-sep-2026): Whisper returned
+    # nothing between 746.73 and 760.97, but the audio there runs at -17.5 to
+    # -27.9 dB RMS - the punch, the laughing and "Welcome to team 11".
+    HOLE_WORDS = [{"w": "body.", "s": 745.39, "e": 745.67},
+                  {"w": "All", "s": 745.87, "e": 746.23},
+                  {"w": "right", "s": 746.23, "e": 746.73},
+                  {"w": "Training", "s": 760.97, "e": 761.39},
+                  {"w": "is", "s": 761.39, "e": 761.59}]
+
+    def test_an_end_placed_inside_a_hole_is_kept(self):
+        # Used to collapse to 747.13 (746.73 + max_tail), throwing away the
+        # 13.5 s the caller asked for. Now kept, a full lead clear of "Training".
+        assert snap_edge(760.60, self.HOLE_WORDS, "end") == pytest.approx(760.47)
+        assert snap_edge(750.0, self.HOLE_WORDS, "end") == pytest.approx(750.0)
+
+    def test_an_end_inside_a_hole_never_reaches_the_next_word(self):
+        # Asking deeper than the far edge clamps to next_start - max_lead.
+        assert snap_edge(760.9, self.HOLE_WORDS, "end") == pytest.approx(760.47)
+
+    def test_an_end_short_of_the_padding_still_trims(self):
+        # Below the tight edge nothing changes: this is not a deliberate placement.
+        assert snap_edge(747.0, self.HOLE_WORDS, "end") == pytest.approx(747.13)
+
+    def test_a_start_placed_inside_a_hole_is_kept(self):
+        assert snap_edge(750.0, self.HOLE_WORDS, "start") == pytest.approx(750.0)
+        # ...but never close enough to make "right" audible again.
+        assert snap_edge(746.9, self.HOLE_WORDS, "start") == pytest.approx(747.13)
+
+    def test_a_pause_is_not_a_hole(self):
+        # WORDS' widest gap is 1.0 s, under GAP_IS_A_HOLE: trimming is kept, so
+        # a breath still cuts tight.
+        assert ac.GAP_IS_A_HOLE == 2.0
+        assert snap_edge(3.4, WORDS, "end") == pytest.approx(2.9)
+        assert snap_edge(2.6, WORDS, "start") == pytest.approx(3.0)
+
+    def test_a_hole_needs_a_word_on_both_sides(self):
+        # Past the last word the transcript says nothing about what is there,
+        # so the conservative trim stays.
+        assert snap_edge(770.0, self.HOLE_WORDS, "end") == pytest.approx(761.99)
+
     def test_never_before_zero(self):
         assert snap_edge(0.0, [{"w": "hi", "s": 0.05, "e": 0.4}], "start") == 0.0
 
