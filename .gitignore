@@ -46,3 +46,6 @@ skills-lock.json
 # Cloud env example kept local only (avoid leaking infra hints)
 .env.cloud.example
 .worktrees
+
+# Editor backups; niches/ is scanned at runtime, keep it to real niche files.
+*.saved.bak
