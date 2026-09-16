@@ -9,6 +9,7 @@ import Modal from './ui/Modal';
 import SegmentedControl from './ui/SegmentedControl';
 import WatermarkModal, { watermarkNoticeDismissed } from './WatermarkModal';
 import TikTokDraftNotice from './TikTokDraftNotice';
+import ClipVerdict from './ClipVerdict';
 import { useAuth } from '../contexts/AuthContext';
 import { renderInBrowser } from '../lib/renderInBrowser';
 
@@ -867,6 +868,10 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                         {editError}
                     </div>
                 )}
+
+                {/* Was this clip worth posting? Feeds the verdict store, which
+                    is what makes any change to clip selection measurable. */}
+                <ClipVerdict jobId={jobId} index={index} />
 
                 {/* Actions Footer */}
                 <div className="grid grid-cols-2 gap-2 mt-auto pt-4 border-t border-rule">
