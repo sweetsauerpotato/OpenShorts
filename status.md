@@ -9,18 +9,69 @@ verified.
 ## Where the work stands
 
 Goal: give Claude a link in chat and get clips back, with Claude choosing the
-moments instead of Gemini (MCP). Steps 1-4 are done and work end to end
-through `/mcp`. **Nothing below is pushed**: 8 local commits, `672c4d5`..`350ef48`.
+moments instead of Gemini (MCP). Steps 1-4 and **3.5 are done** and work end to
+end through `/mcp`. **Nothing below is pushed**: 10 local commits,
+`672c4d5`..`857eece`.
 
-Left to do:
-- **3.5**: the real end-to-end run from the chat (not curl), then Gemini's
-  clips vs Claude's on the same video, judged by the user.
-- Open question for the user: which video for that comparison. Sources kept in
-  `.cache/headtohead/` (Jake Paul job `216fe922`, democracy job `c4e6388d`)
-  because `output/` deletes jobs after 24 h.
+3.5 was run on the Jake Paul video (23.6 min) on 16-sep-2026: Gemini's 6 clips
+(job `216fe922`) against Claude's 5 (job `01e40a09`), same source, same
+transcript, same instructions — only the chooser differed. The user judged
+Claude's set better on every axis and singled out the cold-open re-ordering
+(clip 3 opens on the worst line of the 2017 email, then plays the setup).
+
+Next, in order:
+- **The vision feature — highest priority.** Selection is text-only today and
+  that is its ceiling: see the 14.2 s hole below. Architecture options were
+  brainstormed 16-sep; the plan is still to draft. Decisions already taken:
+  Claude API cost is acceptable if the results earn it, local models stay a
+  **support** option only, and the dev box is an i7-13th/RTX 4070 laptop with
+  **8 GB VRAM** and 16 GB RAM — a 7B VLM alongside the existing stack will not
+  fit comfortably (qwen2.5:7b-instruct alone is ~5.3 GB). Claude takes images
+  only; there is no video input, so frames must be extracted here. Open
+  questions: per-video budget, CPU budget for a dense local pass, and that
+  there is no labelled "funny moment" set to measure against.
 - `docs/how-openshorts-works.md` is written but not committed.
 
+Sources are kept in `.cache/headtohead/` (Jake Paul `216fe922`, democracy
+`c4e6388d`) because `output/` deletes jobs after 24 h — `216fe922` was swept
+mid-session and the cached copy is the only one left. The render job
+`01e40a09` still holds the source (it was hard-linked, so the sweep did not
+free it) and works as a `source_job_id`.
+
 ---
+
+## 2026-09-16 — `857eece` fix(agent-clips): an edge placed inside a transcript hole is kept
+
+**What**: `agent_clips.snap_edge` no longer drags an edge back to the nearest
+word when the caller put it inside a gap of `GAP_IS_A_HOLE` (2 s) or more. It
+still stops a full lead/tail clear of the word on the far side, and only holes
+bounded by a word on both sides qualify — past the first or last word the trim
+stays. Below 2 s nothing changes.
+
+**Why**: the padding assumes a gap is silence. A hole is a stretch Whisper
+returned nothing for, which is not the same thing. Found during the 3.5
+head-to-head: the best clip of the Jake Paul video asked to end at 760.60 and
+was silently cut to 747.13, deleting the punch landing, the laughing and
+"Welcome to team 11". Measured with ffmpeg, that 14.2 s hole (746.7-761.0) runs
+at **-17.5 to -27.9 dB RMS** — louder than the speech around it, and the
+loudest single second in the window (748 s) is inside it. The same 14 s is why
+Gemini's transcript-only scoring ended its own clip at 745.77: both halves of
+the pipeline are blind to non-verbal moments, and this fixes the half that
+ignores an agent saying otherwise.
+
+**Threshold**: 2 s is where the two populations separate. Inter-word gaps over
+two real transcripts (3,566 and 8,440 words) — `>= 0.5 s`: 68 / 272;
+`>= 1 s`: 45 / 54; `>= 2 s`: 36 / 26; `>= 5 s`: 19 / 13. Both collapse between
+0.5 and 1 s (ordinary pauses) and flatten after 1.5-2 s.
+
+**Files**: `agent_clips.py`, `CLAUDE.md`, `tests/test_agent_clips.py` (+6).
+
+**Verified**: 1085 tests in the container (was 1079). Replayed over the 13
+pieces of the real 5-clip set, **exactly 1 edge moved** (+13.3 s on the broken
+one) and the other 12 were byte-identical. Live through `/mcp` after a restart:
+`render_clips` with the original `760.6` produced segments
+`726.27-734.29 + 737.55-760.47` with no hand repair, where before the fix the
+same request rendered a 17.6 s clip ending at 747.13.
 
 ## 2026-09-16 — `350ef48` feat(mcp): render_clips — the agent's own clips, in pieces
 
