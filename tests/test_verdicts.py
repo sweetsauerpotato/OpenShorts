@@ -136,6 +136,32 @@ class TestSummarise:
         assert out["rated"] == 0 and out["score_split"]["good"] is None
 
 
+class TestUnrating:
+    def test_clearing_hides_it_from_the_job_and_the_counts(self):
+        # A misclick must be reversible, and "no opinion" is not "bad".
+        rows = [v.build_row("j", 0, "good", now=1.0),
+                v.build_row("j", 0, "unrated", now=2.0),
+                v.build_row("j", 1, "bad", "boring", now=1.0)]
+        assert set(v.for_job(rows, "j")) == {1}
+        out = v.summarise(rows)
+        assert out["rated"] == 1 and out["by_verdict"] == {"bad": 1}
+
+    def test_clearing_drops_any_reason(self):
+        assert v.normalize("unrated", "boring") == ("unrated", None)
+
+    def test_the_history_survives_the_clear(self):
+        # Append-only: clearing adds a row, it does not erase what was thought.
+        rows = [v.build_row("j", 0, "good", now=1.0),
+                v.build_row("j", 0, "unrated", now=2.0)]
+        assert [r["verdict"] for r in rows] == ["good", "unrated"]
+
+    def test_rating_again_after_clearing_works(self):
+        rows = [v.build_row("j", 0, "good", now=1.0),
+                v.build_row("j", 0, "unrated", now=2.0),
+                v.build_row("j", 0, "bad", "bad_cut", now=3.0)]
+        assert v.for_job(rows, "j")[0]["verdict"] == "bad"
+
+
 class TestErasure:
     def test_drops_only_that_users_rows(self):
         rows = [v.build_row("j", 0, "good", user="u1", now=1.0),

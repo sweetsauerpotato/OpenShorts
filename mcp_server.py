@@ -359,7 +359,10 @@ TOOLS = [
                 "job_id": {"type": "string"},
                 "clip_index": {"type": "number",
                                "description": "0-based index from list_clips."},
-                "verdict": {"type": "string", "enum": ["good", "bad"]},
+                "verdict": {
+                    "type": "string", "enum": ["good", "bad", "unrated"],
+                    "description": "'unrated' clears a rating the user no longer stands behind.",
+                },
                 "reason": {
                     "type": "string",
                     "enum": ["no_payoff", "needs_context", "nothing_to_watch",

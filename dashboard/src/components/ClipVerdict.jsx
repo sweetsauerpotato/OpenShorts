@@ -80,9 +80,12 @@ export default function ClipVerdict({ jobId, index }) {
                 aria-label={label}
                 title={label}
                 onClick={() => {
-                    if (value === 'bad') { setAsking(!asking || verdict !== 'bad'); }
-                    else { setAsking(false); }
-                    send(value, value === 'bad' ? reason : null);
+                    // Clicking the thumb that is already on clears the rating.
+                    // Without this there is no way back out of a misclick, and
+                    // "no opinion" is a different thing from "bad".
+                    if (on) { setAsking(false); send('unrated'); return; }
+                    setAsking(value === 'bad');
+                    send(value, null);
                 }}
                 className={`flex items-center gap-1 px-2 py-1 rounded-input border text-[11px] lowercase transition-colors disabled:opacity-45 ${
                     on ? 'border-brass text-brass' : 'border-rule text-muted hover:text-ink2'
@@ -98,7 +101,7 @@ export default function ClipVerdict({ jobId, index }) {
         <div className="mt-3 pt-3 border-t border-rule">
             <div className="flex items-center gap-2 flex-wrap">
                 <span className="text-[11px] lowercase text-muted mr-auto">
-                    worth posting?
+                    worth posting?{verdict ? ' · click again to clear' : ''}
                 </span>
                 {thumb('good', ThumbsUp, 'yes')}
                 {thumb('bad', ThumbsDown, 'no')}

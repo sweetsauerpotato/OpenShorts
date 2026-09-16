@@ -31,9 +31,12 @@ import json
 import os
 import time
 
-# Thumbs. Kept deliberately small — "posted" and engagement land on the row
-# later as separate fields, not as more verdict values.
-VERDICTS = ("good", "bad")
+# Thumbs, plus the way back out. "unrated" is a real row rather than a delete
+# because the store is append-only: clicking a thumb off is another append that
+# the latest-wins rule turns into "no opinion", and the history of what was
+# thought when stays intact. Counting excludes it everywhere.
+VERDICTS = ("good", "bad", "unrated")
+UNRATED = "unrated"
 
 # Why a clip was not worth posting. Closed, countable, and aligned with the
 # failure modes clip_rules.md already names, so a count here points straight at
@@ -60,6 +63,8 @@ def normalize(verdict, reason=None):
     v = str(verdict or "").strip().lower()
     if v not in VERDICTS:
         raise VerdictError(f"verdict must be one of {', '.join(VERDICTS)}")
+    if v == UNRATED:
+        return v, None          # clearing carries no reason
     r = str(reason or "").strip().lower() or None
     if r is not None and r not in REASONS:
         raise VerdictError(f"reason must be one of {', '.join(REASONS)}")
@@ -151,8 +156,9 @@ def latest(rows):
 
 
 def for_job(rows, job_id):
-    """Current verdicts for one job, by clip index."""
-    return {k[1]: v for k, v in latest(rows).items() if k[0] == str(job_id)}
+    """Current verdicts for one job, by clip index. Cleared clips are absent."""
+    return {k[1]: v for k, v in latest(rows).items()
+            if k[0] == str(job_id) and v.get("verdict") != UNRATED}
 
 
 def summarise(rows):
@@ -163,7 +169,8 @@ def summarise(rows):
     the picker's own score is not measuring what the user wants, and no amount
     of re-ranking on it will help.
     """
-    current = list(latest(rows).values())
+    # A cleared clip is not an opinion, so it counts for nothing here.
+    current = [r for r in latest(rows).values() if r.get("verdict") != UNRATED]
     by_verdict, by_reason, by_mode = {}, {}, {}
     liked, disliked = [], []
     for row in current:
