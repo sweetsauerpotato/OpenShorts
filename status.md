@@ -44,6 +44,48 @@ free it) and works as a `source_job_id`.
 
 ---
 
+## 2026-09-16 — `aedfd65` feat(niches): what a good moment is in this kind of video
+
+**What**: `niches.py` + `niches/*.md`, a third prompt layer between
+`clip_rules.md` and the per-video instructions box (which still wins). Ships
+`tech_podcast` and `creator_chaos`. Reaches pass 1, pass 2, `get_visual_clips`
+and the first page of `get_transcript`; `/api/process`, MCP `process_video`
+(enum built from the files on disk) and a dashboard select all take it.
+
+**Why**: Phase B of `docs/vision-plan.md`. Free text in the box is per-video and
+disappears with it, so the same guidance had to be retyped and could never be
+improved from evidence. A niche is a file we can rewrite when
+`verdicts.summarise` shows which reason keeps recurring.
+
+`creator_chaos` carries the rule this pipeline most needed — **the payoff is
+often non-verbal, so do not end a clip where the talking stops** — which is the
+exact failure that cut the body shot at 745.77 and that `snap_edge` and
+`transcript_holes` each fixed from a different direction.
+
+**Design points**: files not constants, like `clip_rules.md`, so editing a
+prompt needs no deploy (`.dockerignore` re-includes them past `*.md`); the name
+is matched against a safe pattern rather than sanitised, because it reaches the
+filesystem; an unknown name is a 400 **listing the real ones at submit**, not a
+job that ran unguided after 20 minutes; `with_niche` is called before
+`with_clip_instructions` so the creator's block lands nearer the data and its
+claim to outrank what is above it stays true.
+
+**Files**: `niches.py` + `niches/` (new), `main.py`, `app.py`, `mcp_server.py`,
+`.dockerignore`, `CLAUDE.md`, `MediaInput.jsx`, `App.jsx`,
+`tests/test_niches.py` (+26).
+
+**Verified**: 1155 tests (was 1129), dashboard lint and build. Live: unknown
+niche and a `../` traversal both 400 with the real names; the real pass-1
+prompt gains the block in the right order (CONTENT TYPE before CREATOR
+INSTRUCTIONS before the data) and an empty niche leaves it byte-identical.
+Cost ~723 input tokens per call, ~$0.0008 on a 23.6-min video.
+
+**Not measured**: whether either niche changes what gets picked. The controls
+exist for it — `6bf64b65` (no niche, no repair) and `367946a9`
+(`REPAIR_HOLES=1`, no niche) on the same source and instructions — so a third
+run with `niche=creator_chaos` is directly comparable, judged through the
+verdict store.
+
 ## 2026-09-16 — `8f07418` + `916b4e6` feat(verdicts): what the user thought of a clip
 
 **What**: `verdicts.py`, `POST /api/verdict`, `GET /api/verdicts`, MCP
