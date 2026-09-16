@@ -1,45 +1,77 @@
-# Creator, influencer and streamer videos — vlogs, challenges, reactions
+# Creators, streamers, vlogs — IRL, reaction, challenge, Gen Z / brainrot
 
-The audience came to be entertained, not informed. The clip works when a
-stranger laughs, winces, or wants to show someone else — not when they learn
-something.
+The viewer came to be entertained, not informed. A clip works when a stranger
+laughs, winces, or sends it to someone — not when they learn something. This is
+the fastest-moving format on the platforms: retention is weighted above
+everything, so a clip that takes four seconds to get going is already lost.
+
+## Length
+
+**Aim 15-35 s.** Short and dense beats complete. If the moment genuinely needs
+45 s, take it, but the default here is much tighter than an interview clip —
+one beat, one payoff, out.
 
 ## Look for
 
-- A reaction: genuine surprise, panic, disbelief, someone losing it laughing.
-- A stunt, a dare, a bet, or a challenge, and the moment it lands or fails.
-- An argument, roast or wind-up between people who know each other.
-- Physical comedy — a hit, a fall, a spill, something breaking.
-- An absurd object or situation played straight: the thing nobody expected to
-  be there.
-- Someone being told a number, a price or a rule that shocks them.
-- A confession or an awkward admission, especially an old one resurfacing.
-- A payoff to something set up earlier in the video, if the setup fits too.
+You are reading a transcript, so you cannot see the reaction. These are what a
+reaction looks like **in text** — trust them:
+
+- **Short overlapping exclamations**: "no way", "what", "stop", "bro", "oh my
+  god", "WHAT IS THAT", swearing, screaming spelled out.
+- **A word or phrase repeated fast** — "no no no no", "wait wait wait". Repetition
+  in a transcript is almost always someone losing it.
+- **Crosstalk**: several people talking over each other in a few seconds.
+- **A number or a price said out loud to someone who did not expect it** —
+  "you paid HOW much".
+- **A dare, a bet or a challenge** being set, and the line where it lands or
+  fails.
+- **An argument, roast or wind-up** between people who know each other.
+- **A confession or an old thing resurfacing** — an embarrassing message, a
+  past claim, something they hoped nobody kept.
+- **An absurd object or situation named plainly** — the thing nobody expected
+  to be there.
+- **A sudden topic break** — the conversation was about one thing and something
+  physically happened.
 
 ## Skip
 
 - Sponsor reads, ad breaks, merch pitches.
 - "Subscribe", "like the video", "comment below", giveaway rules — including
   when they are woven into the action.
-- "Later in the video…" teases: the payoff is somewhere else, so the clip has
-  none.
-- Travel and transit filler, setup logistics, waiting around.
+- "Later in the video…" teases: the payoff is elsewhere, so the clip has none.
+- Travel, transit, setup logistics, waiting around.
 - Inside jokes that need the channel's history.
+- A long explanation of what is about to happen. The happening is the clip.
 
 ## Cutting
 
-**The payoff here is often non-verbal** — a hit landing, a face, a scream, a
-room reacting. Do not end a clip where the talking stops: the laugh, the
-reaction and the "oh my god" after it are the point, and cutting before them
-throws the moment away. Prefer a clip that runs a few seconds past the last
-word over one that ends on it.
+**The payoff is usually NOT a sentence.** It is a hit landing, a scream, a
+room reacting. A transcript goes quiet or turns to fragments exactly where the
+moment peaks — so **do not end the clip where the talking stops.** Run past the
+last clean sentence into the reaction. Ending on the last word is the single
+most common way to destroy one of these clips.
 
-Open in the middle of the action when the setup is obvious from what is on
-screen. These speakers interrupt each other and swear; keep the crosstalk,
-it is the texture.
+**Start as late as you can get away with.** Open inside the action. If what is
+happening is obvious from the situation, skip the setup entirely — these
+viewers infer context fast and punish a slow opening harder than confusion.
 
-## Hook and title
+Cut out dead air, "umm", false starts and waiting. Keep the crosstalk and the
+swearing: that is the texture, not noise. When a moment has a build and a
+payoff far apart, take the payoff first and the build after it.
 
-Say what happens, in the speaker's register: "I let a pro boxer hit me in the
-body", not "An interesting boxing demonstration". First person where the video
-is. Never promise a payoff the clip does not contain.
+## Hook (on screen, first 5 seconds)
+
+Say what happens, in the speaker's register, first person where the video is:
+
+- "I let a pro boxer hit me in the body"
+- "He didn't know it cost $40,000"
+- "We gave him a fire truck"
+
+Plain and concrete beats clever. No "you won't believe", no "watch till the
+end", no emoji. Never promise a payoff the clip does not contain.
+
+## Title and description
+
+Match how the audience would describe it to a friend, not how a magazine would.
+Keep the name of anyone recognisable in the first three words. Hashtags for the
+creator and the specific thing that happened, never generic spam.

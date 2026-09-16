@@ -14,12 +14,25 @@ const TRANSCRIPT_MAX = 300000;
 
 // Starters for the instructions box. Each one INSERTS editable text: nothing is
 // hidden, what is in the box is exactly what the AI receives.
+// The niche now says what kind of video this is, so these say what ANGLE to
+// take within it. Each is specific and uses "only"/"never", which the prompt
+// treats as a hard limit -- vague presets ("pick the funniest moments") let the
+// model fall back on its own taste and produce whatever it would have anyway.
 const INSTRUCTION_PRESETS = [
-    { label: 'funny', text: 'Pick the funniest moments: jokes, banter, reactions and absurd situations.' },
-    { label: 'insights & tips', text: 'Pick moments that teach something: a concrete tip, a surprising fact or a clear takeaway.' },
-    { label: 'stories', text: 'Pick emotional or personal stories that have a clear payoff.' },
-    { label: 'hot takes', text: 'Pick bold opinions, disagreements and controversial statements.' },
-    { label: 'skip filler', text: 'Never pick intros, outros, sponsor reads, ads or housekeeping.' },
+    { label: 'contradictions',
+      text: 'Only moments where someone claims something that contradicts what most people believe, and says it plainly. Skip anything the speakers simply agree on.' },
+    { label: 'numbers & names',
+      text: 'Only moments containing a concrete number, date, price or named company or person. Skip general advice with no specifics in it.' },
+    { label: 'disagreement',
+      text: 'Only moments where the speakers actually disagree or push back on each other. Politeness that hides a split does not count; take the line where it surfaces.' },
+    { label: 'reactions',
+      text: 'Only moments with a real reaction: surprise, laughing, shock, someone losing it. The reaction is the payoff, so do not end the clip before it.' },
+    { label: 'stories',
+      text: 'Only personal stories with a turn: what they expected, then what actually happened. Skip anecdotes that never pay off.' },
+    { label: 'how it works',
+      text: 'Only moments that explain how something actually works, cleanly enough to stand alone. Skip definitions with no payoff attached.' },
+    { label: 'skip promo',
+      text: 'Never pick sponsor reads, ads, subscribe pitches, giveaways, or "later in the video" teases.' },
 ];
 
 export default function MediaInput({ onProcess, isProcessing }) {
@@ -301,7 +314,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
                 {/* Creator instructions — optional; steers every clip-selection stage */}
                 <div className="mt-5">
                     <div className="flex items-baseline justify-between gap-3 mb-2">
-                        <p className="eyebrow">what to clip · optional</p>
+                        <p className="eyebrow">what to clip · optional · overrides the video type</p>
                         <span className="readout">{clipInstructions.length}/{CLIP_INSTRUCTIONS_MAX}</span>
                     </div>
                     <textarea
@@ -310,7 +323,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
                         rows={2}
                         maxLength={CLIP_INSTRUCTIONS_MAX}
                         className="input-field resize-none text-sm"
-                        placeholder="e.g. only moments where the guest gives a concrete tip; skip the sponsor read"
+                        placeholder="e.g. only the moments about pricing; skip anything before the first question"
                         aria-label="clip instructions"
                     />
                     <div className="mt-2 flex flex-wrap gap-1.5">

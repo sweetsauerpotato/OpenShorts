@@ -20,8 +20,10 @@ class TestLoad:
     def test_loads_real_text(self):
         text = niches.load("creator_chaos")
         assert len(text) > 200
-        # The one thing this niche exists to say.
-        assert "non-verbal" in text.lower()
+        # The one rule this niche exists to carry: the payoff is a reaction,
+        # not a sentence, so the clip must not stop at the last word. That is
+        # the failure that cut the Jake Paul body shot at 745.77.
+        assert "do not end the clip where the talking stops" in text.lower()
 
     def test_blank_is_none_not_an_error(self):
         assert niches.load(None) is None
@@ -116,3 +118,18 @@ class TestShippedContent:
     def test_tech_podcast_asks_for_specifics(self):
         text = niches.load("tech_podcast").lower()
         assert "number" in text and "disagree" in text
+
+    def test_each_niche_states_its_own_length_band(self):
+        # The bands differ on purpose and are the clearest measured effect the
+        # niche has: an interview clip needs room for claim + reason +
+        # consequence, a stream clip is one beat and out.
+        tech = niches.load("tech_podcast").lower()
+        chaos = niches.load("creator_chaos").lower()
+        assert "35-60" in tech and "15-35" in chaos
+
+    def test_tech_podcast_does_not_tell_it_to_cut_short(self):
+        # Measured 17-sep: against no niche on the same source, tech_podcast
+        # pulled the mean clip from 46.3 s to 36.1 s, and the one clip the user
+        # would post was 50.6 s. Ending early was the wrong instinct.
+        tech = niches.load("tech_podcast").lower()
+        assert "do not cut a clip short" in tech

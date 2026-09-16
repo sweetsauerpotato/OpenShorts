@@ -716,17 +716,44 @@ clips never goes through those prompts — the first page of `get_transcript`, a
 disk. Dashboard: "what kind of video" in advanced options, remembered in
 `localStorage.os_niche`.
 
+**It works, measured** (17-sep-2026). Same 10.4-min source, same instructions,
+niche the only difference:
+
+    niche=tech_podcast   mean clip 36.1 s   titles: "The waiter trick that
+                                            explains how your brain works"
+    niche=(none)         mean clip 46.3 s   titles: "Why Your Brain Hates
+                                            Unfinished Work"
+
+4 of 5 moments were shared, and three of those had **identical starts** (207.41,
+331.85) with the niche version ending 5.8-12.3 s earlier — its own "end on the
+consequence, not the qualification" rule firing. Titles went from generic
+listicle to the specific claim.
+
+**But shorter was the wrong direction**, and the rules were rewritten for it:
+the one clip the user said they would post was **50.6 s**, from the longer
+no-niche set, and the Shorts sweet spot for interview content is 45-90 s. Each
+niche now states its own band — `tech_podcast` **35-60 s** with "do not cut a
+clip short", `creator_chaos` **15-35 s** — instead of leaving length to a
+general rule tuned on neither.
+
+The rewritten files also encode what the research says actually decides a clip:
+the commonest failure is **starting too early**, layering setup before the
+moment; concrete numbers create the pause that stops a scroll; and for
+`creator_chaos` the payoff is usually not a sentence at all, so the rules name
+the **textual** signatures of a reaction (short overlapping exclamations, a word
+repeated fast, crosstalk) because the scorer only ever sees a transcript.
+
 Cost: **~723 input tokens per call**, so ~4 calls on a 23.6-min video is
-+$0.0008. The instructions precedent says to expect it back — a 56-character
-instruction moved on-topic clips from 1 of 6 to 3 of 3 and made the job
-*cheaper*, because fewer clips means less pass-2 output at 6x the input price.
-**Unmeasured**: whether either niche changes what gets picked. That needs a run
-against the verdict store.
++$0.0008.
 
 ### Verdicts: what the user thought of a clip (`verdicts.py`)
 
 `POST /api/verdict` (dashboard) and MCP `rate_clip` record a thumbs up/down on
-one clip, with an optional reason from a **closed** list (`no_payoff`,
+one clip — or `unrated`, which clears one, because a misclick has to be
+reversible and "no opinion" is not "bad". Clearing is another append, not a
+delete: the latest-wins rule turns it into no verdict while the history of what
+was thought stays intact, and `for_job`/`summarise` both exclude it. Verdicts
+take an optional reason from a **closed** list (`no_payoff`,
 `needs_context`, `nothing_to_watch`, `boring`, `wrong_moment`, `bad_cut`) —
 closed for the same reason `DELETION_REASONS` is: free text on a row designed to
 outlive its job cannot be counted, and collects things nobody planned to store.
