@@ -1,3 +1,4 @@
+<!-- label: Tech / intellectual podcast -->
 # Tech and intellectual podcasts, interviews, long-form conversation
 
 This is the format whose clips channels built the audience — Rogan, Lex, Diary
@@ -75,3 +76,20 @@ Name the specific claim, not the topic: "Compute stops being the bottleneck in
 2027", not "His thoughts on AI". Keyword in the first three words. The
 description should give the one line of context the clip assumes, then the
 hashtags for the subject — not generic ones.
+
+## Suggestions
+
+<!-- Prompt STARTERS for the dashboard box, not criteria. This section is
+     stripped before the niche is sent, so nothing here reaches the model twice.
+     Each one must NARROW or OVERRIDE the rules above -- "only X", "never Y", a
+     different audience, a different length. A starter that restates a rule
+     already in this file or in clip_rules.md changes nothing when it is
+     ticked, and only teaches the user that the box does not work. Format:
+     "- short label: the text that goes in the box". -->
+
+- only hot takes: Only moments where the speaker says something they could be criticised for saying out loud. If nobody would push back on it, skip it however interesting it is.
+- only how it works: Only moments that explain how something actually works, start to finish, with no term left undefined. Skip opinion, prediction and anecdote.
+- only the disagreement: Only moments where the speakers do not agree. Open on the sentence where the split surfaces, not on the polite lead-up to it.
+- only stories: Only first-person stories — something that happened to this speaker, with a turn in it. Skip frameworks, analysis and advice.
+- no jargon: Skip any moment that needs field knowledge to follow. If it uses an acronym or a term the speaker does not define inside the clip, pick a different moment.
+- keep the question: Keep the host's question at the front of every clip, even when the answer would stand alone.

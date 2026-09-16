@@ -568,6 +568,7 @@ under it.
 |--------|-------|---------|
 | POST | `/api/process` | Submit video for processing |
 | POST/GET | `/api/verdict`, `/api/verdicts` | Record and read clip verdicts (see Verdicts) |
+| GET | `/api/niches` | The video kinds and each one's prompt starters (see Niches) |
 | GET | `/api/status/{job_id}` | Poll job status and logs |
 | POST | `/api/edit` | Apply AI video effects |
 | POST | `/api/subtitle` | Generate and apply subtitles (auto-transcribes dubbed videos) |
@@ -770,6 +771,38 @@ repeated fast, crosstalk) because the scorer only ever sees a transcript.
 
 Cost: **~723 input tokens per call**, so ~4 calls on a 23.6-min video is
 +$0.0008.
+
+**A niche file has two halves, and only one of them is the model's**
+(17-sep-2026). Everything above a `## Suggestions` heading is criteria;
+that heading and everything after it are prompt STARTERS for the dashboard's
+"what to clip" box, and `niches.load` strips them — along with the
+`<!-- label: ... -->` comment that names the niche in the picker — so nothing
+in the UI half is ever sent. Sending them would weight the same guidance twice,
+and an `only X` line from a chip nobody clicked would narrow the whole job.
+`niches.describe` / `catalog` read that half; `GET /api/niches` serves it, so a
+new `niches/*.md` appears in the picker with its own chips and **no frontend
+deploy** — the reason the criteria are files at all. A malformed line costs one
+chip, never the dropdown: these are edited by hand.
+
+**A starter has to ask for something the layers below cannot already do.** The
+first set failed that and was replaced: `skip promo` restated `clip_rules.md`'s
+Never list *and* both niches' Skip sections, so ticking it changed nothing, and
+`contradictions` / `numbers & names` / `how it works` were the `tech_podcast`
+criteria typed out a second time. A starter that changes nothing teaches the
+user the box does not work. So every one now **narrows** the criteria (`only`
+one of the niche's nine signals, which is real because the box is a hard limit
+and the niche is guidance) or **overrides** them — `creator_chaos`'s
+`advertiser safe` contradicts its own "keep the crosstalk and the swearing:
+that is the texture". Tests pin both: every shipped starter opens with
+only/skip/keep/never/return/ignore, and none of them mentions sponsors or
+subscribes again.
+
+The four **general** starters stay in `MediaInput.jsx` because no file could
+own them: they are about THIS video — its subject, its timeline, who is in it,
+how many clips are wanted — and three carry a `[PLACEHOLDER]` the user fills,
+which the box warns about while it is still there, since it is sent verbatim.
+The picker moved out of advanced options and above the box: it now decides both
+the criteria and which chips appear, so it has to be visible.
 
 ### Verdicts: what the user thought of a clip (`verdicts.py`)
 

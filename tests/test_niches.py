@@ -133,3 +133,128 @@ class TestShippedContent:
         # would post was 50.6 s. Ending early was the wrong instinct.
         tech = niches.load("tech_podcast").lower()
         assert "do not cut a clip short" in tech
+
+
+SHIPPED = ["tech_podcast", "creator_chaos"]
+
+
+class TestTheUIHalfStaysOutOfThePrompt:
+    """A niche file feeds two readers, and only one of them is the model."""
+
+    @pytest.mark.parametrize("name", SHIPPED)
+    def test_the_starters_never_reach_the_model(self, name):
+        # They restate the file's own rules as instructions. Sending them with
+        # the criteria would weight the same guidance twice, and "only X" from
+        # a chip the user never clicked would narrow the whole job.
+        criteria = niches.load(name)
+        for starter in niches.describe(name)["suggestions"]:
+            assert starter["text"] not in criteria
+        assert "## Suggestions" not in criteria
+
+    @pytest.mark.parametrize("name", SHIPPED)
+    def test_no_metadata_comment_reaches_the_model(self, name):
+        assert "<!--" not in niches.load(name)
+        assert "label:" not in niches.load(name)
+
+    def test_the_heading_only_splits_on_its_own_line(self):
+        # A mention of the word in prose must not truncate the criteria.
+        text = "look for X\nnot a ## Suggestions mention\n\n## Suggestions\n- a: b\n"
+        assert "not a ## Suggestions mention" in niches._clean(text)
+        assert "- a: b" not in niches._clean(text)
+
+    def test_a_file_with_no_ui_half_still_loads(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(niches, "NICHE_DIR", str(tmp_path))
+        (tmp_path / "plain.md").write_text("# Plain\n\nLook for things. Skip others.",
+                                           encoding="utf-8")
+        assert niches.describe("plain")["suggestions"] == []
+        assert "Look for things" in niches.load("plain")
+
+
+class TestDescribe:
+    @pytest.mark.parametrize("name", SHIPPED)
+    def test_each_shipped_niche_has_a_label_and_starters(self, name):
+        got = niches.describe(name)
+        assert got["name"] == name
+        assert 3 <= len(got["label"]) <= 60
+        assert got["label"] != niches._default_label(name)   # a real one, not the fallback
+        assert len(got["suggestions"]) >= 3
+
+    def test_a_missing_label_falls_back_to_the_name(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(niches, "NICHE_DIR", str(tmp_path))
+        (tmp_path / "car_reviews.md").write_text("# Cars", encoding="utf-8")
+        assert niches.describe("car_reviews")["label"] == "Car reviews"
+
+    def test_a_malformed_line_costs_one_chip_not_the_file(self, tmp_path, monkeypatch):
+        # These files are edited by hand. A line that is not "- label: text"
+        # is skipped; the good ones still come back.
+        monkeypatch.setattr(niches, "NICHE_DIR", str(tmp_path))
+        (tmp_path / "xx.md").write_text(
+            "# X\n\n## Suggestions\n\n- no colon here at all\n"
+            "- good: Only the good moments.\n- : empty label\n- also good: Skip the rest.\n",
+            encoding="utf-8")
+        got = [s["label"] for s in niches.describe("xx")["suggestions"]]
+        assert got == ["good", "also good"]
+
+    def test_the_counts_are_bounded(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(niches, "NICHE_DIR", str(tmp_path))
+        (tmp_path / "xx.md").write_text(
+            "# X\n\n## Suggestions\n\n"
+            + "".join(f"- l{i}: Only {'x' * 600}\n" for i in range(20)),
+            encoding="utf-8")
+        got = niches.describe("xx")["suggestions"]
+        assert len(got) == niches.MAX_SUGGESTIONS
+        assert all(len(s["text"]) <= niches.MAX_SUGGESTION_CHARS for s in got)
+
+    def test_a_bad_name_is_refused_here_too(self):
+        with pytest.raises(niches.NicheError):
+            niches.describe("../../etc/passwd")
+        assert niches.describe("") is None
+
+    def test_the_catalog_survives_a_file_it_cannot_read(self, tmp_path, monkeypatch):
+        # The dropdown is built from this; one bad file must not empty it.
+        monkeypatch.setattr(niches, "NICHE_DIR", str(tmp_path))
+        (tmp_path / "good.md").write_text("# Good", encoding="utf-8")
+        monkeypatch.setattr(niches, "available", lambda: ["good", "gone"])
+        assert [n["name"] for n in niches.catalog()] == ["good"]
+
+
+class TestTheStartersEarnTheirPlace:
+    """A starter has to ask for something the layers below cannot already do.
+
+    The set this replaced failed that: "skip promo" restated clip_rules.md's
+    Never list AND both Skip sections, and the rest were the tech_podcast
+    criteria typed out again. Ticking one changed nothing.
+    """
+
+    # Narrow the criteria, or override them. Nothing else belongs in the box.
+    VERBS = ("only", "skip", "keep", "never", "return", "ignore")
+
+    @pytest.mark.parametrize("name", SHIPPED)
+    def test_every_starter_narrows_or_overrides(self, name):
+        for starter in niches.describe(name)["suggestions"]:
+            first = starter["text"].split()[0].lower().strip(",.")
+            assert first in self.VERBS, f"{name}/{starter['label']}: {first}"
+
+    @pytest.mark.parametrize("name", SHIPPED)
+    def test_no_starter_re_bans_what_is_already_banned(self, name):
+        # clip_rules.md's Never list and both niches' Skip sections already
+        # drop sponsor reads and subscribe pitches. Asking again is the exact
+        # failure this set was rewritten to remove.
+        for starter in niches.describe(name)["suggestions"]:
+            low = starter["text"].lower()
+            assert "sponsor" not in low and "subscribe" not in low
+
+    @pytest.mark.parametrize("name", SHIPPED)
+    def test_a_starter_fits_the_box(self, name):
+        from clip_selection import CLIP_INSTRUCTIONS_MAX_CHARS
+        for starter in niches.describe(name)["suggestions"]:
+            assert len(starter["text"]) <= CLIP_INSTRUCTIONS_MAX_CHARS // 2
+            assert len(starter["label"]) <= 40
+
+    def test_creator_chaos_can_contradict_its_own_rules(self):
+        # The clearest demonstration of what the top layer is for: the niche
+        # says the swearing is the texture, and the creator can still say no.
+        chaos = niches.describe("creator_chaos")
+        texts = " ".join(s["text"].lower() for s in chaos["suggestions"])
+        assert "swearing" in texts
+        assert "keep the crosstalk" in niches.load("creator_chaos").lower()

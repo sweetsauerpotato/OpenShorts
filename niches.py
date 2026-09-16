@@ -38,6 +38,25 @@ _NAME = re.compile(r"^[a-z][a-z0-9_]{1,30}$")
 
 MAX_NICHE_CHARS = 4000
 
+# A niche file has two halves. Everything above ``## Suggestions`` is criteria
+# for the model; that heading and everything after it is the dashboard's, and
+# is stripped before the niche is sent. Keeping the starters in the same file
+# as the rules is the point: a starter has to NARROW or OVERRIDE what the rules
+# already say, and that is only checkable when both are in front of you. It
+# also means a new niches/*.md appears in the dropdown with its own chips and
+# no frontend deploy — the reason the criteria live in files at all.
+_UI_HEADING = re.compile(r"^##\s+suggestions\b.*$", re.I | re.M)
+# HTML comments carry the UI metadata (`<!-- label: ... -->`) and editing notes.
+# Invisible in rendered markdown, and never sent to the model.
+_COMMENT = re.compile(r"<!--.*?-->", re.S)
+_LABEL = re.compile(r"<!--\s*label\s*:\s*(.+?)\s*-->", re.I | re.S)
+# One starter per list item: "- short label: the text that goes in the box".
+# Split on the FIRST colon, so the text itself may contain one.
+_SUGGESTION = re.compile(r"^[-*]\s+([^:\n]{1,40}?)\s*:\s*(\S.*)$", re.M)
+
+MAX_SUGGESTIONS = 8
+MAX_SUGGESTION_CHARS = 400
+
 
 class NicheError(ValueError):
     """Unknown or unusable niche: safe to show as a 400."""
@@ -53,15 +72,15 @@ def available():
         return []
 
 
-def load(name):
-    """The text of a niche, or None when ``name`` is blank.
+def _read(name):
+    """The raw file for a niche, or None when ``name`` is blank.
 
     Raises NicheError for a name that is not on disk, so a typo in the API is a
     400 that lists the real ones instead of a job that silently ran unguided.
     """
     key = str(name or "").strip().lower()
     if not key:
-        return None
+        return None, None
     if not _NAME.match(key):
         raise NicheError(
             f"niche '{name}' is not a valid name; choose one of: "
@@ -69,22 +88,78 @@ def load(name):
     path = os.path.join(NICHE_DIR, key + ".md")
     try:
         with open(path, encoding="utf-8") as fh:
-            text = fh.read()
+            return key, fh.read()
     except OSError:
         raise NicheError(
             f"unknown niche '{key}'; choose one of: "
             f"{', '.join(available()) or '(none installed)'}")
-    text = _clean(text)
+
+
+def load(name):
+    """The criteria a niche sends to the model, or None when ``name`` is blank.
+
+    The UI half of the file (``## Suggestions``, the metadata comments) is not
+    part of this: the starters restate the rules as instructions, and sending
+    them alongside would weight the same guidance twice.
+    """
+    key, raw = _read(name)
+    if key is None:
+        return None
+    text = _clean(raw)
     if not text:
         raise NicheError(f"niche '{key}' is empty")
     return text[:MAX_NICHE_CHARS]
 
 
 def _clean(text):
-    """Strip control characters and the delimiter the block uses."""
+    """Strip control characters, the UI half, and the delimiter the block uses."""
     text = "".join(ch for ch in (text or "") if ch == "\n" or ch >= " ")
+    text = _UI_HEADING.split(text, maxsplit=1)[0]
+    text = _COMMENT.sub("", text)
     text = re.sub(r"</?niche>", "", text, flags=re.IGNORECASE)
     return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def _default_label(key):
+    return key.replace("_", " ").capitalize()
+
+
+def describe(name):
+    """One niche as the dashboard needs it: name, label and prompt starters.
+
+    A file it cannot parse costs one chip, never the dropdown: these are meant
+    to be edited by hand, so a malformed line is skipped rather than raised.
+    """
+    key, raw = _read(name)
+    if key is None:
+        return None
+    raw = "".join(ch for ch in raw if ch == "\n" or ch >= " ")
+    label = _LABEL.search(raw)
+    parts = _UI_HEADING.split(raw, maxsplit=1)
+    ui = _COMMENT.sub("", parts[1]) if len(parts) > 1 else ""
+    suggestions = [
+        {"label": m.group(1).strip(),
+         "text": m.group(2).strip()[:MAX_SUGGESTION_CHARS]}
+        for m in _SUGGESTION.finditer(ui)
+    ]
+    return {
+        "name": key,
+        "label": (label.group(1).strip()[:60] if label else _default_label(key)),
+        "suggestions": suggestions[:MAX_SUGGESTIONS],
+    }
+
+
+def catalog():
+    """Every niche on disk, for the dashboard's picker. Never raises."""
+    out = []
+    for name in available():
+        try:
+            described = describe(name)
+        except (NicheError, OSError):
+            continue
+        if described:
+            out.append(described)
+    return out
 
 
 # How each stage should use the niche. Mirrors the shape of

@@ -1961,6 +1961,18 @@ async def get_config():
         "jobRetentionSeconds": JOB_RETENTION_SECONDS,
     }
 
+@app.get("/api/niches")
+async def get_niches():
+    """The kinds of video the picker knows, and the prompt starters for each.
+
+    Served from niches/*.md rather than listed in the dashboard so a new niche
+    file shows up in the picker with its own chips and no frontend deploy --
+    the same reason the criteria are files. It also keeps the starters honest:
+    they sit under the rules they are meant to narrow, where a starter that
+    merely restates one is visible as such.
+    """
+    return {"niches": niches.catalog()}
+
 async def _probe_youtube_quality(url: str) -> dict:
     """Run quality_probe.py in a worker thread; {} on any failure (fail-open)."""
     def _run():

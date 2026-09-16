@@ -1,3 +1,4 @@
+<!-- label: Creator, streamer, vlog -->
 # Creators, streamers, vlogs — IRL, reaction, challenge, Gen Z / brainrot
 
 The viewer came to be entertained, not informed. A clip works when a stranger
@@ -75,3 +76,19 @@ end", no emoji. Never promise a payoff the clip does not contain.
 Match how the audience would describe it to a friend, not how a magazine would.
 Keep the name of anyone recognisable in the first three words. Hashtags for the
 creator and the specific thing that happened, never generic spam.
+
+## Suggestions
+
+<!-- Prompt STARTERS for the dashboard box, not criteria. This section is
+     stripped before the niche is sent, so nothing here reaches the model twice.
+     Each one must NARROW or OVERRIDE the rules above -- "only X", "never Y", a
+     different audience, a different length. A starter that restates a rule
+     already in this file or in clip_rules.md changes nothing when it is
+     ticked, and only teaches the user that the box does not work. Format:
+     "- short label: the text that goes in the box". -->
+
+- only the reaction: Only moments where someone actually reacts — screaming, losing it, going silent, a room turning. Skip anything that is only people talking, however funny the words are.
+- only when something happens: Only moments where something physically happens: the hit, the crash, the reveal, the thing arriving. The talking around it is not the clip.
+- only the wind-up: Only roasts, arguments and wind-ups between people who know each other. Skip commentary said alone to camera.
+- advertiser safe: Skip any moment containing swearing or slurs, even a strong one. This has to be safe to run ads against.
+- no reaction content: Skip moments that are a reaction to someone else's video. Only what happens in this room.

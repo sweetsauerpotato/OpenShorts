@@ -14,26 +14,32 @@ const TRANSCRIPT_MAX = 300000;
 
 // Starters for the instructions box. Each one INSERTS editable text: nothing is
 // hidden, what is in the box is exactly what the AI receives.
-// The niche now says what kind of video this is, so these say what ANGLE to
-// take within it. Each is specific and uses "only"/"never", which the prompt
-// treats as a hard limit -- vague presets ("pick the funniest moments") let the
-// model fall back on its own taste and produce whatever it would have anyway.
-const INSTRUCTION_PRESETS = [
-    { label: 'contradictions',
-      text: 'Only moments where someone claims something that contradicts what most people believe, and says it plainly. Skip anything the speakers simply agree on.' },
-    { label: 'numbers & names',
-      text: 'Only moments containing a concrete number, date, price or named company or person. Skip general advice with no specifics in it.' },
-    { label: 'disagreement',
-      text: 'Only moments where the speakers actually disagree or push back on each other. Politeness that hides a split does not count; take the line where it surfaces.' },
-    { label: 'reactions',
-      text: 'Only moments with a real reaction: surprise, laughing, shock, someone losing it. The reaction is the payoff, so do not end the clip before it.' },
-    { label: 'stories',
-      text: 'Only personal stories with a turn: what they expected, then what actually happened. Skip anecdotes that never pay off.' },
-    { label: 'how it works',
-      text: 'Only moments that explain how something actually works, cleanly enough to stand alone. Skip definitions with no payoff attached.' },
-    { label: 'skip promo',
-      text: 'Never pick sponsor reads, ads, subscribe pitches, giveaways, or "later in the video" teases.' },
+//
+// A starter has to ask for something the layers below CANNOT already do. The
+// set before this one failed that test: "skip promo" restated clip_rules.md's
+// Never list *and* both niches' Skip sections, so ticking it changed nothing,
+// and the rest ("contradictions", "numbers", "how it works") were the
+// tech_podcast criteria typed out a second time. A starter that changes
+// nothing teaches the user the box does not work.
+//
+// So these are the ones that belong to no niche, because no file could hold
+// them: they are about THIS video — its subject, its timeline, who is in it,
+// how many clips are wanted. The per-niche starters come from the niche files
+// (GET /api/niches), where they sit under the rules they narrow.
+const GENERAL_PRESETS = [
+    { label: 'only this topic',
+      text: 'Only moments about [TOPIC]. Ignore everything else, even a strong moment.' },
+    { label: 'skip the start',
+      text: 'Ignore everything before [MM:SS]. The video only starts properly after that.' },
+    { label: 'one speaker',
+      text: 'Only moments where [NAME] is the one making the point. Other voices can be in the clip, but the moment has to be theirs.' },
+    { label: 'fewer, better',
+      text: 'Return at most 3 clips, and only ones you would score 90 or above. Returning fewer is the right answer if the video does not hold more.' },
 ];
+
+// The box is sent verbatim, so a starter left with its [PLACEHOLDER] unfilled
+// would reach the model as those literal characters.
+const PLACEHOLDER = /\[[A-Z][A-Z:\s]*\]/;
 
 export default function MediaInput({ onProcess, isProcessing }) {
     const [youtubeUrlEnabled, setYoutubeUrlEnabled] = useState(true);
@@ -71,6 +77,10 @@ export default function MediaInput({ onProcess, isProcessing }) {
     const [niche, setNiche] = useState(() => {
         try { return localStorage.getItem('os_niche') || ''; } catch { return ''; }
     });
+    // The niches on the server, with the prompt starters each one carries.
+    // Empty until /api/niches answers, and empty stays harmless: the picker
+    // falls back to General, which is the no-niche behaviour anyway.
+    const [nicheCatalog, setNicheCatalog] = useState([]);
     // Download quality for pasted links ("up to"; a video that tops out lower
     // gets its best). Uploads keep their own resolution, so the row is hidden
     // there. Persisted like the layout so a chosen quality sticks.
@@ -91,6 +101,9 @@ export default function MediaInput({ onProcess, isProcessing }) {
         e.target.value = '';
         if (picked) picked.text().then(setTranscript).catch(() => {});
     };
+    const activeNiche = nicheCatalog.find((n) => n.name === niche) || null;
+    const nichePresets = activeNiche?.suggestions || [];
+    const hasPlaceholder = PLACEHOLDER.test(clipInstructions);
     const addInstructionPreset = (text) => {
         setClipInstructions((current) => {
             if (current.includes(text)) return current;
@@ -119,6 +132,21 @@ export default function MediaInput({ onProcess, isProcessing }) {
                     setYoutubeUrlEnabled(false);
                     setMode('file');
                 }
+            })
+            .catch(() => {});
+    }, []);
+
+    useEffect(() => {
+        fetch(getApiUrl('/api/niches'))
+            .then((r) => r.ok ? r.json() : null)
+            .then((data) => {
+                const list = Array.isArray(data?.niches) ? data.niches : [];
+                if (!list.length) return;
+                setNicheCatalog(list);
+                // A remembered niche whose file was renamed or removed is a 400
+                // at submit, so drop it here rather than carry it into the job.
+                setNiche((current) =>
+                    current && !list.some((n) => n.name === current) ? '' : current);
             })
             .catch(() => {});
     }, []);
@@ -311,8 +339,26 @@ export default function MediaInput({ onProcess, isProcessing }) {
                     </div>
                 </div>
 
-                {/* Creator instructions — optional; steers every clip-selection stage */}
+                {/* What kind of video. Not an advanced option: it decides the
+                    criteria the AI is given AND which starters appear below, so
+                    it has to be visible and above the box it changes. */}
                 <div className="mt-5">
+                    <p className="eyebrow mb-2">what kind of video</p>
+                    <select
+                        value={niche}
+                        onChange={(e) => setNiche(e.target.value)}
+                        className="input-field text-sm"
+                        aria-label="what kind of video"
+                    >
+                        <option value="">General — no preset</option>
+                        {nicheCatalog.map((n) => (
+                            <option key={n.name} value={n.name}>{n.label}</option>
+                        ))}
+                    </select>
+                </div>
+
+                {/* Creator instructions — optional; steers every clip-selection stage */}
+                <div className="mt-4">
                     <div className="flex items-baseline justify-between gap-3 mb-2">
                         <p className="eyebrow">what to clip · optional · overrides the video type</p>
                         <span className="readout">{clipInstructions.length}/{CLIP_INSTRUCTIONS_MAX}</span>
@@ -326,18 +372,49 @@ export default function MediaInput({ onProcess, isProcessing }) {
                         placeholder="e.g. only the moments about pricing; skip anything before the first question"
                         aria-label="clip instructions"
                     />
-                    <div className="mt-2 flex flex-wrap gap-1.5">
-                        {INSTRUCTION_PRESETS.map((preset) => (
-                            <button
-                                key={preset.label}
-                                type="button"
-                                onClick={() => addInstructionPreset(preset.text)}
-                                className="btn-quiet !px-2.5 !py-1 !text-xs"
-                                title={preset.text}
-                            >
-                                + {preset.label}
-                            </button>
-                        ))}
+                    {hasPlaceholder && (
+                        <p className="mt-1.5 text-[11px] leading-relaxed text-brass animate-fade">
+                            Fill in the [BRACKETS] — the box is sent to the AI exactly as written.
+                        </p>
+                    )}
+                    {/* Two rows, because they are two different things. The top
+                        one narrows the niche's own criteria; the bottom one is
+                        about this particular video, which no niche can know. */}
+                    {nichePresets.length > 0 && (
+                        <div className="mt-2.5">
+                            <p className="readout mb-1.5">for {activeNiche.label.toLowerCase()}</p>
+                            <div className="flex flex-wrap gap-1.5">
+                                {nichePresets.map((preset) => (
+                                    <button
+                                        key={preset.label}
+                                        type="button"
+                                        onClick={() => addInstructionPreset(preset.text)}
+                                        className="btn-quiet !px-2.5 !py-1 !text-xs"
+                                        title={preset.text}
+                                    >
+                                        + {preset.label}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+                    <div className="mt-2.5">
+                        {nichePresets.length > 0 && (
+                            <p className="readout mb-1.5">for any video</p>
+                        )}
+                        <div className="flex flex-wrap gap-1.5">
+                            {GENERAL_PRESETS.map((preset) => (
+                                <button
+                                    key={preset.label}
+                                    type="button"
+                                    onClick={() => addInstructionPreset(preset.text)}
+                                    className="btn-quiet !px-2.5 !py-1 !text-xs"
+                                    title={preset.text}
+                                >
+                                    + {preset.label}
+                                </button>
+                            ))}
+                        </div>
                     </div>
                 </div>
 
@@ -437,19 +514,6 @@ export default function MediaInput({ onProcess, isProcessing }) {
                                 Targets, not guarantees: the AI returns fewer clips when the
                                 material doesn't hold them. Leave blank to let it decide.
                             </p>
-                            <div className="col-span-1 sm:col-span-3 flex flex-wrap items-center justify-between gap-3 pt-3 sm:pt-1 border-t border-rule">
-                                <span className="text-xs text-ink2">what kind of video</span>
-                                <select
-                                    value={niche}
-                                    onChange={(e) => setNiche(e.target.value)}
-                                    className="input-field !w-auto text-xs py-1.5"
-                                    aria-label="what kind of video"
-                                >
-                                    <option value="">General (no preset)</option>
-                                    <option value="tech_podcast">Tech / intellectual podcast</option>
-                                    <option value="creator_chaos">Creator, streamer, vlog</option>
-                                </select>
-                            </div>
                             <div className="col-span-1 sm:col-span-3 flex flex-wrap items-center justify-between gap-3 pt-3 sm:pt-1 border-t border-rule">
                                 <span className="text-xs text-ink2">vertical layout</span>
                                 <select
