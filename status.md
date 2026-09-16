@@ -22,7 +22,9 @@ Claude's set better on every axis and singled out the cold-open re-ordering
 (clip 3 opens on the worst line of the 2017 email, then plays the setup).
 
 Next, in order:
-- **The vision feature — highest priority.** Selection is text-only today and
+- **The vision feature — highest priority.** Plan: `docs/vision-plan.md`
+  (16-sep). Blocked on 0.2, the labelled set, which needs an hour of the user's
+  judging; without it no later number means anything. Selection is text-only today and
   that is its ceiling: see the 14.2 s hole below. Architecture options were
   brainstormed 16-sep; the plan is still to draft. Decisions already taken:
   Claude API cost is acceptable if the results earn it, local models stay a
