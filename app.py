@@ -38,6 +38,8 @@ from agent_clips import normalize_agent_clips, AgentClipsError
 load_dotenv()
 
 # Constants
+import verdicts
+
 UPLOAD_DIR = "uploads"
 OUTPUT_DIR = "output"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -1031,10 +1033,9 @@ def _enforce_output_size_cap():
     used = _dir_size(OUTPUT_DIR)
     if used <= cap:
         return
-    thumbs = os.path.basename(THUMBNAILS_DIR)
     candidates = []
     for job_id in os.listdir(OUTPUT_DIR):
-        if job_id == thumbs:
+        if _is_protected_dir(job_id):
             continue
         p = os.path.join(OUTPUT_DIR, job_id)
         if os.path.isdir(p):
@@ -1065,7 +1066,7 @@ def _sweep_retained_sources(now=None):
         return
     now = time.time() if now is None else now
     for job_id in os.listdir(OUTPUT_DIR):
-        if job_id == os.path.basename(THUMBNAILS_DIR):
+        if _is_protected_dir(job_id):
             continue
         try:
             metas = glob.glob(os.path.join(OUTPUT_DIR, job_id, "*_metadata.json"))
@@ -1097,8 +1098,9 @@ async def cleanup_jobs():
             # Check OUTPUT_DIR
             for job_id in os.listdir(OUTPUT_DIR):
                 # Not a job: the thumbnails dir backs a StaticFiles mount, so
-                # deleting it would 500 every /thumbnails request until reboot.
-                if job_id == os.path.basename(THUMBNAILS_DIR):
+                # deleting it would 500 every /thumbnails request until reboot,
+                # and the verdicts store must outlive every job it describes.
+                if _is_protected_dir(job_id):
                     continue
                 job_path = os.path.join(OUTPUT_DIR, job_id)
                 if os.path.isdir(job_path):
@@ -1581,7 +1583,6 @@ def _purge_local_jobs_for_user(user_id) -> int:
     removed = 0
 
     job_ids = {jid for jid, job in list(jobs.items()) if _owned_by(job, uid)}
-    thumbs_dir_name = os.path.basename(THUMBNAILS_DIR)
     try:
         entries = os.listdir(OUTPUT_DIR)
     except OSError:
@@ -1589,7 +1590,7 @@ def _purge_local_jobs_for_user(user_id) -> int:
     for job_id in entries:
         # Never a job, and it backs a StaticFiles mount: deleting the directory
         # itself 500s every /thumbnails request until the process restarts.
-        if job_id == thumbs_dir_name:
+        if _is_protected_dir(job_id):
             continue
         try:
             with open(os.path.join(OUTPUT_DIR, job_id, ".owner")) as f:
@@ -1629,6 +1630,18 @@ def _purge_local_jobs_for_user(user_id) -> int:
             _rm_under(UPLOAD_DIR, os.path.basename(video_path))
         thumbnail_sessions.pop(sid, None)
         removed += 1
+
+    # Verdicts are the user's own words about their own clips, and they
+    # deliberately outlive the jobs they describe — so nothing else here would
+    # ever remove them. Rows with no user are self-host ones and stay.
+    try:
+        rows = verdicts.read_rows(OUTPUT_DIR)
+        kept = verdicts.drop_user(rows, uid)
+        if len(kept) != len(rows):
+            verdicts.rewrite(OUTPUT_DIR, kept)
+            removed += len(rows) - len(kept)
+    except OSError as e:
+        print(f"⚠️ Could not purge verdicts for {uid}: {e}")
 
     if removed:
         print(f"🗑️  Purged {removed} local work item(s) for erased user {uid}.")
@@ -1694,6 +1707,15 @@ app.mount("/videos", StaticFiles(directory=OUTPUT_DIR), name="videos")
 
 # Mount static files for serving thumbnails
 THUMBNAILS_DIR = os.path.join(OUTPUT_DIR, "thumbnails")
+# Verdicts outlive the jobs they describe on purpose: a rating is only
+# worth collecting if it is still there after the 24 h sweep took the clip.
+VERDICTS_DIR = os.path.join(OUTPUT_DIR, verdicts.STORE_DIRNAME)
+
+
+def _is_protected_dir(name):
+    """Entries under OUTPUT_DIR that are not jobs and must never be swept."""
+    return name in (os.path.basename(THUMBNAILS_DIR),
+                    os.path.basename(VERDICTS_DIR))
 os.makedirs(THUMBNAILS_DIR, exist_ok=True)
 app.mount("/thumbnails", StaticFiles(directory=THUMBNAILS_DIR), name="thumbnails")
 
@@ -3197,6 +3219,112 @@ class EditRequest(BaseModel):
     clip_index: int
     api_key: Optional[str] = None
     input_filename: Optional[str] = None
+
+# --- Verdicts: what the user thought of a clip -----------------------------
+class VerdictRequest(BaseModel):
+    job_id: str
+    clip_index: int
+    verdict: str                      # "good" | "bad"
+    reason: Optional[str] = None      # one of verdicts.REASONS, for "bad"
+
+
+def _transcript_end(metadata):
+    """Last transcribed second of a job, or None."""
+    segs = ((metadata or {}).get("transcript") or {}).get("segments") or []
+    ends = [float(sg["end"]) for sg in segs if sg.get("end") is not None]
+    return round(max(ends), 2) if ends else None
+
+
+def _clip_and_context(job_id):
+    """The clip as served plus how it was produced, for a verdict row.
+
+    Reads the job's metadata rather than the in-memory record, so a clip can
+    still be rated after a restart. Unknown provenance stays absent: a null
+    field is honest, a guessed one poisons the measurement later.
+    """
+    job_dir = os.path.join(OUTPUT_DIR, job_id)
+    metas = glob.glob(os.path.join(job_dir, "*_metadata.json"))
+    if not metas:
+        return None, {}
+    try:
+        with open(metas[0], encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None, {}
+    clips = data.get("shorts") or []
+    cost = data.get("cost_analysis") or {}
+    context = {
+        # Vision does not exist yet, so every clip produced today really is
+        # classical. This becomes the real mode when Phase E lands.
+        "mode": "classical",
+        "provider": ("agent" if any(c.get("selected_by") == "agent" for c in clips)
+                     else ("ollama" if str(cost.get("model", "")).startswith("ollama/")
+                           else "gemini")),
+        "model": cost.get("model"),
+        "niche": None,
+        "source": data.get("source_video"),
+        # Not all metadata carries a top-level duration; the transcript's last
+        # segment is the honest fallback and is what the length rules use.
+        "duration": data.get("duration") or _transcript_end(data),
+    }
+    try:
+        instr_path = os.path.join(job_dir, "clip_instructions.txt")
+        with open(instr_path, encoding="utf-8") as fh:
+            context["instructions"] = fh.read().strip()[:1000] or None
+    except OSError:
+        context["instructions"] = None
+    return clips, context
+
+
+@app.post("/api/verdict")
+async def record_verdict(req: VerdictRequest, request: Request):
+    """Record what the user thought of one clip.
+
+    Append-only: rating the same clip again just adds a row and the latest wins.
+    """
+    job = jobs.get(req.job_id) or _job_view_from_disk(req.job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    await _assert_job_owner(request, job)
+
+    clips, context = _clip_and_context(req.job_id)
+    if clips is None:
+        raise HTTPException(status_code=409, detail="That job has no clips to rate yet.")
+    if not 0 <= req.clip_index < len(clips):
+        raise HTTPException(
+            status_code=400,
+            detail=f"clip_index {req.clip_index} is outside this job's {len(clips)} clip(s)")
+
+    user = None
+    try:
+        current = await cloud.auth.get_current_user_optional(request)
+        user = getattr(current, "id", None) if current else None
+    except Exception:
+        user = None
+
+    try:
+        row = verdicts.build_row(req.job_id, req.clip_index, req.verdict, req.reason,
+                                 clip=clips[req.clip_index], context=context, user=user)
+    except verdicts.VerdictError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    await asyncio.get_running_loop().run_in_executor(
+        None, verdicts.append_row, OUTPUT_DIR, row)
+    rows = verdicts.read_rows(OUTPUT_DIR)
+    return {"ok": True, "verdict": row["verdict"], "reason": row["reason"],
+            "summary": verdicts.summarise(rows)}
+
+
+@app.get("/api/verdicts")
+async def list_verdicts(job_id: Optional[str] = None):
+    """Current verdicts — for one job, or the roll-up across everything."""
+    rows = verdicts.read_rows(OUTPUT_DIR)
+    if job_id:
+        return {"job_id": job_id, "verdicts": verdicts.for_job(rows, job_id),
+                "reasons": list(verdicts.REASONS)}
+    return {"summary": verdicts.summarise(rows), "reasons": list(verdicts.REASONS),
+            "rows": len(rows)}
+
 
 @app.post("/api/edit")
 async def edit_clip(

@@ -330,6 +330,36 @@ TOOLS = [
         },
     },
     {
+        "name": "rate_clip",
+        "title": "Record what the user thought of a clip",
+        "description": (
+            "Record the user's verdict on one clip, so clip selection can be "
+            "measured and improved. Call it when the user says a clip is good "
+            "or bad -- never guess a verdict for them. 'bad' takes an optional "
+            "reason from a closed list: no_payoff, needs_context, "
+            "nothing_to_watch, boring, wrong_moment, bad_cut. Re-rating the "
+            "same clip replaces the previous verdict. Returns the running "
+            "summary, including score_split -- the mean predicted_score of "
+            "clips the user liked against the ones they did not."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "job_id": {"type": "string"},
+                "clip_index": {"type": "number",
+                               "description": "0-based index from list_clips."},
+                "verdict": {"type": "string", "enum": ["good", "bad"]},
+                "reason": {
+                    "type": "string",
+                    "enum": ["no_payoff", "needs_context", "nothing_to_watch",
+                             "boring", "wrong_moment", "bad_cut"],
+                    "description": "Why it was not worth posting. For 'bad'.",
+                },
+            },
+            "required": ["job_id", "clip_index", "verdict"],
+        },
+    },
+    {
         "name": "get_quota",
         "title": "Get plan and remaining minutes",
         "description": (
@@ -604,6 +634,17 @@ async def _tool_render_clips(client, args):
     return data, False
 
 
+async def _tool_rate_clip(client, args):
+    body = {"job_id": args.get("job_id"), "clip_index": args.get("clip_index"),
+            "verdict": args.get("verdict")}
+    if args.get("reason"):
+        body["reason"] = args["reason"]
+    resp = await client.post("/api/verdict", json=body)
+    if resp.status_code >= 400:
+        return _api_error(resp), True
+    return resp.json(), False
+
+
 async def _tool_get_quota(client, args):
     resp = await client.get("/api/me")
     # 401: anonymous. 404: self-host, where /api/me isn't even mounted (the
@@ -664,6 +705,7 @@ _TOOL_IMPLS = {
     "list_clips": _tool_list_clips,
     "get_transcript": _tool_get_transcript,
     "render_clips": _tool_render_clips,
+    "rate_clip": _tool_rate_clip,
     "get_quota": _tool_get_quota,
     "add_subtitles": _tool_add_subtitles,
     "recut_clip": _tool_recut_clip,

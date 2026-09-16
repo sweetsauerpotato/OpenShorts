@@ -346,6 +346,7 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 | `tools/compare_selection.py` | Harness that measures clip selection on a cached transcript (see "How clips are chosen") |
 | `transcript_import.py` | Stdlib-only reader for pasted transcripts (YouTube panel, SRT, VTT, JSON) and the clip-range merge of exact words (see "Pasted transcripts") |
 | `transcript_holes.py` | Stdlib-only: the gaps a whole-video Whisper pass dropped, and the closed-choice gate that keeps song lyrics out of what comes back |
+| `verdicts.py` | Stdlib-only: the user's thumbs on a clip, the closed reason list, and the provenance that lets the data say whether a change helped |
 | `agent_clips.py` | Stdlib-only validation of the clips an agent sends (render_clips) and where their piece edges land |
 | `app.py` | FastAPI server with async job queue and REST endpoints |
 | `editor.py` | Gemini AI integration for dynamic video effects (FFmpeg filter generation) |
@@ -540,6 +541,7 @@ under it.
 | Method | Route | Purpose |
 |--------|-------|---------|
 | POST | `/api/process` | Submit video for processing |
+| POST/GET | `/api/verdict`, `/api/verdicts` | Record and read clip verdicts (see Verdicts) |
 | GET | `/api/status/{job_id}` | Poll job status and logs |
 | POST | `/api/edit` | Apply AI video effects |
 | POST | `/api/subtitle` | Generate and apply subtitles (auto-transcribes dubbed videos) |
@@ -671,6 +673,40 @@ under it.
   landed within 0.06 s of the exact-transcript cut on 3 of 4 edges after the
   fixes above; every piece keeps its first and last word (checked against a
   separate whole-video Whisper run).
+
+### Verdicts: what the user thought of a clip (`verdicts.py`)
+
+`POST /api/verdict` (dashboard) and MCP `rate_clip` record a thumbs up/down on
+one clip, with an optional reason from a **closed** list (`no_payoff`,
+`needs_context`, `nothing_to_watch`, `boring`, `wrong_moment`, `bad_cut`) —
+closed for the same reason `DELETION_REASONS` is: free text on a row designed to
+outlive its job cannot be counted, and collects things nobody planned to store.
+
+**Why it exists**: no change to clip selection can be called better without it.
+The picker's own numbers are not a quality signal (pass 1 answers on a coarse
+grid with 7-9 tied pairs in the top 10, run-to-run clip agreement is 3/7-4/7),
+and the transcript underneath varies 15.7% of its words between two runs of the
+same file. A vision feature worth less than that noise is undetectable without
+labels. See `docs/vision-plan.md`.
+
+**Every row records how the clip was produced** — `mode`, `provider`, `model`,
+`niche`, source, duration, instructions — because without that the data can only
+say some clips were liked, never *whether vision helped*. `mode` is `classical`
+until the vision modes land. Unknown provenance stays null: a guessed field
+poisons the measurement.
+
+`predicted_score` is stored beside the human verdict on purpose, so
+`summarise()["score_split"]` answers "does the model's own score track what the
+user actually wants" with no extra work. If those two means never separate, no
+amount of re-ranking on that score will help.
+
+Append-only JSONL at **`output/verdicts/verdicts.jsonl`**; the latest row for a
+(job, clip) wins, so re-rating is one more append and a crash mid-write loses a
+line, not the file. It lives under `OUTPUT_DIR` but is **protected from every
+sweep** (`app._is_protected_dir`, alongside `thumbnails/`) — a rating is only
+worth collecting if it survives the 24 h purge that takes the clip it describes.
+Account erasure removes that user's rows (`verdicts.drop_user`), since nothing
+else ever would; rows with no user are self-host and stay.
 
 ### Account erasure (GDPR art. 17)
 
