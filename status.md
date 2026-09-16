@@ -11,7 +11,7 @@ verified.
 Goal: give Claude a link in chat and get clips back, with Claude choosing the
 moments instead of Gemini (MCP). Steps 1-4 and **3.5 are done** and work end to
 end through `/mcp`. **Nothing below is pushed**: 10 local commits,
-`672c4d5`..`e9a432f`.
+`672c4d5`..`1343352`.
 
 3.5 was run on the Jake Paul video (23.6 min) on 16-sep-2026: Gemini's 6 clips
 (job `216fe922`) against Claude's 5 (job `01e40a09`), same source, same
@@ -40,7 +40,7 @@ free it) and works as a `source_job_id`.
 
 ---
 
-## 2026-09-16 — `e9a432f` docs: the hole measurement was run-dependent, and repair changes what Gemini picks
+## 2026-09-16 — `1343352` docs: the hole measurement was run-dependent, and repair changes what Gemini picks
 
 **What**: corrects the numbers recorded for `6d63ccb` and adds the end-to-end
 result. No behaviour change.
