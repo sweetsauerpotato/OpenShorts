@@ -44,6 +44,49 @@ free it) and works as a `source_job_id`.
 
 ---
 
+## 2026-09-16 — `8f07418` + `916b4e6` feat(verdicts): what the user thought of a clip
+
+**What**: `verdicts.py`, `POST /api/verdict`, `GET /api/verdicts`, MCP
+`rate_clip`, and a "worth posting?" row on every dashboard clip card. Thumbs
+up/down plus an optional reason from a closed list (`no_payoff`,
+`needs_context`, `nothing_to_watch`, `boring`, `wrong_moment`, `bad_cut`).
+
+**Why**: Phase A of `docs/vision-plan.md`, and the gate on everything after it.
+Nothing measured this week can say whether clip selection got *better*: pass 1
+answers on a coarse grid with 7-9 tied pairs in the top 10, run-to-run clip
+agreement is 3/7-4/7, and the transcript underneath varies 15.7% of its words
+between two runs of the same file. A vision change worth less than that noise
+is undetectable without labels.
+
+**The design points that matter**:
+- Every row records **how the clip was produced** — mode, provider, model,
+  niche, source, duration, instructions — or the data can only say some clips
+  were liked, never whether vision helped. `mode` is `classical` until the
+  modes land; unknown provenance stays null rather than guessed.
+- `predicted_score` sits beside the human verdict, so `score_split` answers
+  whether the picker's own score tracks what the user wants. If those two means
+  never separate, re-ranking on that score cannot help.
+- Append-only JSONL, latest row per (job, clip) wins, so re-rating is one more
+  append and a crash mid-write loses a line rather than the file.
+- Protected from every `OUTPUT_DIR` sweep alongside `thumbnails/`: a rating is
+  only worth collecting if it outlives the 24 h purge that takes the clip.
+- Account erasure drops that user's rows, since nothing else ever would.
+
+**Files**: `verdicts.py` (new), `app.py`, `mcp_server.py`, `CLAUDE.md`,
+`dashboard/src/components/ClipVerdict.jsx` (new), `ResultCard.jsx`,
+`tests/test_verdicts.py` (+24).
+
+**Verified**: 1129 tests (was 1105); dashboard lint and build. Live on a real
+job: verdicts stored and read back with full provenance (duration resolved to
+1417.49 s from the transcript), free-text reason 400, out-of-range clip 400,
+unknown job 404, `rate_clip` served as the 11th MCP tool. The rows written
+during that test were wiped, so the store starts empty.
+
+**Not done**: the clip card has not been seen rendered — reaching one means
+running a job through the UI — so lint and build are what stand behind the
+markup. Engagement metrics are not wired; per the plan they are a weak late
+signal, not the point.
+
 ## 2026-09-16 — `1343352` docs: the hole measurement was run-dependent, and repair changes what Gemini picks
 
 **What**: corrects the numbers recorded for `6d63ccb` and adds the end-to-end
