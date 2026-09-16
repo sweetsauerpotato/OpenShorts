@@ -44,6 +44,74 @@ free it) and works as a `source_job_id`.
 
 ---
 
+## 2026-09-17 — `ceaee4f` feat(niches): starters that are not a copy of the rules
+
+**The starters had become a second copy of the layer below them.** `skip promo`
+asked the model to skip sponsor reads and subscribe pitches — which
+`clip_rules.md`'s Never list already bans, and which both niches ban again in
+their own Skip sections. Ticking it changed nothing. `contradictions`,
+`numbers & names`, `disagreement` and `how it works` were the `tech_podcast`
+criteria typed out a second time; they had been written *before* the niche
+files existed and were never revisited after. A starter that changes nothing
+teaches the user that the box does not work.
+
+**A niche file now has two halves.** Everything above a `## Suggestions`
+heading is criteria for the model; that heading and everything below it are the
+dashboard's chips. `niches.load` strips them, and strips the
+`<!-- label: ... -->` comment that names the niche in the picker, so nothing in
+the UI half is ever sent: it would weight the same guidance twice, and an
+`only X` line from a chip nobody clicked would narrow the whole job.
+
+`niches.describe` / `niches.catalog` read that half and `GET /api/niches`
+serves it. So the picker is no longer a hard-coded list in `MediaInput.jsx`:
+a new `niches/*.md` shows up with its own chips and **no frontend deploy** —
+the same reason the criteria are files. A malformed line costs one chip and
+never the dropdown, since these are meant to be edited by hand.
+
+**What earns a place as a starter**: it must ask for something the layers below
+cannot already do. Two shapes qualify.
+
+- **Narrow.** `only the disagreement` is not a restatement of the niche's
+  disagreement bullet — the niche lists nine signals as *guidance*, the box is
+  a *hard limit*, so "only this one of the nine" is a real change. Six for
+  `tech_podcast`, five for `creator_chaos`.
+- **Override.** `creator_chaos`'s `advertiser safe` contradicts that niche's
+  own "keep the crosstalk and the swearing: that is the texture, not noise".
+  That is the clearest demonstration of what the top layer is for.
+
+Tests pin both: the UI half never appears in `load()`, every shipped starter
+opens with only/skip/keep/never/return/ignore, and none of them mentions
+sponsors or subscribes again.
+
+**The four general starters stay in the frontend** because no file could own
+them: they are about THIS video — its subject (`only this topic`), its timeline
+(`skip the start`), who is in it (`one speaker`), how many clips are wanted
+(`fewer, better`). Three carry a `[PLACEHOLDER]`; the box is sent verbatim, so
+an amber line warns while one is still unfilled and clears when it is.
+
+**The picker moved out of advanced options, above the box.** It now decides
+both the criteria the model gets and which chips appear, so hiding it behind a
+disclosure below the thing it changes was wrong. A remembered `os_niche` the
+server no longer has is dropped when the catalog arrives, rather than carried
+into a 400 at submit.
+
+Files: `niches.py` (`_read`, `describe`, `catalog`, `_clean` strips the UI
+half), `niches/tech_podcast.md` + `niches/creator_chaos.md` (label comment,
+`## Suggestions`), `app.py` (`GET /api/niches`),
+`dashboard/src/components/MediaInput.jsx`, `tests/test_niches.py`, `CLAUDE.md`.
+
+Verified: **1196 tests** (was 1176), eslint clean. Live on the running stack —
+`/api/niches` returns both niches with labels and chips in correct UTF-8, and
+the box renders 6 + 4 chips on `tech_podcast`, 5 + 4 on `creator_chaos`, and 4
+with no headings on General. The placeholder warning appears on inserting
+`only this topic` and clears when the bracket is filled.
+
+**Not measured**: whether these starters produce better clips than the old
+ones. That needs the verdict store to have rows on both, and it is the kind of
+change — a wording difference on a prompt block — that the run-to-run noise
+already documented (3/7-4/7 clip agreement) can easily swallow. What *is*
+established is that one of the old starters was a no-op by construction.
+
 ## 2026-09-17 — `8a54937` fix(clip-selection): the mid-phrase start
 
 **What**: when a clip's sentence opened more than `max_shift` (8 s) ago, the
