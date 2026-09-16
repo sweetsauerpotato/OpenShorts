@@ -11,7 +11,7 @@ verified.
 Goal: give Claude a link in chat and get clips back, with Claude choosing the
 moments instead of Gemini (MCP). Steps 1-4 and **3.5 are done** and work end to
 end through `/mcp`. **Nothing below is pushed**: 10 local commits,
-`672c4d5`..`857eece`.
+`672c4d5`..`6d63ccb`.
 
 3.5 was run on the Jake Paul video (23.6 min) on 16-sep-2026: Gemini's 6 clips
 (job `216fe922`) against Claude's 5 (job `01e40a09`), same source, same
@@ -39,6 +39,51 @@ mid-session and the cached copy is the only one left. The render job
 free it) and works as a `source_job_id`.
 
 ---
+
+## 2026-09-16 — `6d63ccb` feat(transcript): recover the speech the whole-video pass drops
+
+**What**: `transcript_holes.py` + `main.repair_transcript_holes` (off unless
+`REPAIR_HOLES=1`). Gaps of >= 2 s between words are re-transcribed on their own
+and the recovered words are spliced back in, after a closed-choice gate drops
+anything that is song lyrics or noise.
+
+**Why**: this started as "caption the silent stretch as [LAUGHTER]" and that
+premise was wrong. The stretch is not non-speech — Whisper transcribes it
+perfectly in isolation (90 words, identical with `vad_filter` on and off); the
+whole-video pass emitted no segment there at all. `[LAUGHTER]` over "Welcome to
+team 11, bro" would have been a caption that lies. The real defect is that the
+transcript is missing 13.4% of its words, which costs captions AND clip
+selection, since pass 1 can only score what it can read.
+
+**The hard part**: a hole is where the music is. Naive repair returns Fortunate
+Son and a Rick Ross verse as dialogue. Whisper's own confidence signals do not
+separate music from speech — the two most confident-looking fragments in the
+measurement were both lyrics (`no_speech_prob` 0.019 and `avg_logprob` -0.236,
+best of all 26), the same failure mode the layout picker records from four
+attempts at a continuous measure. So the gate is a closed choice
+(dialogue/music/noise) over one text-only call through `llm_provider`, gated
+per Whisper segment so mixed stretches are judged in pieces. Every failure path
+— no key, bad JSON, unknown verdict, a 503 outlasting the retry budget —
+returns "keep nothing", because a dropped line just leaves today's transcript
+while a kept lyric gets published.
+
+**Files**: `transcript_holes.py` (new), `main.py`, `gemini_worker.py`,
+`CLAUDE.md`, `tests/test_transcript_holes.py` (+20).
+
+**Verified**: 1105 tests in the container (was 1085). Live on the Jake Paul
+source: 36 holes / 370 s (26% of runtime) re-transcribed in 114 s of CPU,
+recovering 478 words (+13.4%); the gate answered 69 fragments in 6.8 s on
+flash-lite, keeping 60 — **1 genuine false keep**, 1 segment where Whisper had
+merged a lyric with real speech, 2 harmless drops of repetitive interjections,
+and it correctly dropped both "All my new friends" and the Fortunate Son lines
+while keeping the real narration inside the same hole. A `gemini-3.7-flash`
+comparison could not be obtained (503 for the full 180 s budget, twice) — which
+did confirm the fail-safe: the gate returned nothing and the transcript was
+left untouched.
+
+**Not done**: `REPAIR_HOLES` is off by default and the recovered words have not
+yet been put through clip selection end to end — the point of the +13.4% is
+that pass 1 should now see moments it was blind to, and that is unmeasured.
 
 ## 2026-09-16 — `857eece` fix(agent-clips): an edge placed inside a transcript hole is kept
 
