@@ -344,6 +344,20 @@ _MAX_TAIL_WORDS = 2   # "right?" before a start / "And" after an end is a fragme
 _MAX_TRIM = 1.5
 
 
+# A capitalised word only starts a sentence if it does not BIND to the word
+# before it. Without this the cue fires on every proper noun, which is how a
+# 30 s split threshold once cut "that is the | Al-Aqsa Mosque." - no sentence
+# begins straight after "the", "of" or "my".
+_BINDS_FORWARD = frozenset("""
+a an the this that these those my your his her its our their
+of in on at to for with from by into onto about over under near
+and or but as than like
+""".split())
+
+# A gap this long reads as a breath even when the transcript is unpunctuated.
+_CUE_PAUSE = 0.3
+
+
 def sentence_spans(words, max_span_seconds=45.0):
     """The sentences of a transcript's word list, for cutting clips on whole sentences.
 
@@ -382,27 +396,41 @@ def sentence_spans(words, max_span_seconds=45.0):
     return spans
 
 
+def sentence_cue(words, k):
+    """Does ``words[k+1]`` begin a new sentence, with no punctuation to say so?
+
+    Two signals: a real pause before it, or a capitalised word that is neither
+    "I" nor bound to the word before it (``_BINDS_FORWARD``). That binding test
+    is what separates a sentence start from a proper noun.
+    """
+    import re
+
+    if k < 0 or k + 1 >= len(words):
+        return False
+    following = str(words[k + 1]["w"]).strip()
+    if not following:
+        return False
+    if float(words[k + 1]["s"]) - float(words[k]["e"]) >= _CUE_PAUSE:
+        return True
+    if not following[:1].isupper() or re.split(r"['’]", following)[0] == "I":
+        return False
+    previous = re.sub(r"[^\w']", "", str(words[k]["w"])).lower()
+    return previous not in _BINDS_FORWARD
+
+
 def _split_point(words, a, b):
     """Where to split an over-long unpunctuated run ``words[a..b]``: after the
-    word nearest the run's middle among those followed by a real pause
-    (>= 0.3 s) or a capitalised word (not "I"); with no such cue, the word
-    nearest the middle.
+    word nearest the run's middle among those carrying a sentence cue; with no
+    cue anywhere, the word nearest the middle.
 
     Splitting at the single longest pause peeled off one word at a time when
     Whisper left no gaps: on 15-sep-2026 a 50 s stretch of the documentary
     (every gap 0.00 s) became 55 one-word "sentences", and pass 2 closed a clip
-    on "that".
+    on "that". The middle fallback stays because an end still needs a boundary
+    it can reach: a cue-less run left whole gives a clip nothing to close on.
     """
-    import re
-
     middle = (float(words[a]["s"]) + float(words[b]["e"])) / 2
-
-    def cue(k):
-        following = str(words[k + 1]["w"]).strip()
-        return (float(words[k + 1]["s"]) - float(words[k]["e"]) >= 0.3
-                or (following[:1].isupper() and re.split(r"['’]", following)[0] != "I"))
-
-    candidates = [k for k in range(a, b) if cue(k)] or list(range(a, b))
+    candidates = [k for k in range(a, b) if sentence_cue(words, k)] or list(range(a, b))
     return min(candidates, key=lambda k: abs(float(words[k]["e"]) - middle))
 
 
@@ -454,6 +482,20 @@ def snap_clip_to_sentences(start, end, words, video_duration, min_duration=15.0,
         new_start = spans[owner[first_k] + 1]["start"]
     elif start - opening["start"] <= max_shift:
         new_start = opening["start"]
+    else:
+        # The sentence opened more than max_shift ago, so its start is out of
+        # reach and the clip would otherwise open wherever pass 2 happened to
+        # stop -- mid-phrase. That happens where the transcript has no
+        # punctuation for a long stretch (Whisper leaves it out, and a pasted
+        # auto-caption often has none at all), so this "sentence" is really
+        # several. Fall back to the same cue the run-on splitter uses and take
+        # the LATEST one still within max_shift, which keeps the opening the
+        # model chose as close as possible while starting on a real boundary.
+        floor = start - max_shift
+        new_start = next(
+            (float(words[k]["s"]) for k in range(first_k, opening["first"], -1)
+             if float(words[k]["s"]) >= floor and sentence_cue(words, k - 1)),
+            new_start)
 
     def legal(t):
         return min_duration <= t - new_start <= max_duration - _HEADROOM

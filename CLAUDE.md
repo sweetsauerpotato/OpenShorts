@@ -123,7 +123,32 @@ nouns ("that is the | Al-Aqsa Mosque."). `tools/compare_selection.py --replay`
 re-cuts saved raw answers with no API calls: finished endings 16% -> 100% on
 the 55-min records, 56% -> 97% on the 10-min slice (its miss is where the slice
 itself cuts the transcript), 2/6 -> 6/6 on the job; no start moved later, no
-clip left 15-60 s. The clip editor and MCP `recut_clip` keep word snapping on
+clip left 15-60 s.
+
+**A start too deep inside an unpunctuated stretch** (17-sep-2026). The START
+rule could reach a sentence's opening only within `max_shift` (8 s); past that
+it fell through and the clip opened wherever pass 2 stopped, mid-phrase. On a
+10-min podcast a clip opened 12.9 s inside an 18.1 s "sentence" with
+"...that was the one time | but on the list of the others mind". **13% of that
+transcript's sentences (15 of 114) run longer than 8 s**, so long-form speech
+hits this regularly. It is not fixable by splitting spans: `cut_quality`
+counts only REAL punctuation on purpose ("so the metric cannot flatter the
+cutter"), and there is no punctuation there to find — every inter-word gap in
+that stretch is 0.00 s and Whisper left no period, so lowering
+`max_span_seconds` changes nothing (measured at 45/30/25/20/15/12 s: identical
+starts, and ends got *worse* below 30). So the START now falls back to the same
+cue `_split_point` uses and takes the LATEST one still within `max_shift`,
+keeping the model's opening as close as possible. Measured over 31 saved
+answers: punctuation starts unchanged (documentary 19/21, both podcasts 4/5),
+**cue starts 20/21 and 5/5 and 5/5**, no clip outside the band, start moves
+median 0.0-0.2 s.
+
+`sentence_cue` is that test, extracted so the splitter and the START path
+cannot drift. It adds the guard the old inline version lacked: a capitalised
+word is only a boundary when the word before it does not BIND forward
+(`_BINDS_FORWARD` — the, a, of, my, in, and...). That is what made "that is the
+| Al-Aqsa Mosque." a split point at a 30 s threshold; no sentence begins
+straight after "the". A real pause still overrides the guard. The clip editor and MCP `recut_clip` keep word snapping on
 purpose: their cuts are deliberate.
 
 **Pass 2 reads whole timed sentences.** Its `lines` are

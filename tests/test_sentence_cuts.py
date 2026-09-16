@@ -259,3 +259,70 @@ def test_the_prompt_takes_the_end_from_the_closing_sentence():
     assert "`end`   = the SECOND number of the sentence you close on." in template
     assert "`start` = the FIRST number of the sentence you open on." in template
     assert "END ON A FINISHED THOUGHT" in template
+
+class TestSentenceCue:
+    """The cue that stands in for punctuation the transcriber left out."""
+
+    def test_a_pause_is_a_cue(self):
+        w = [{"w": " one", "s": 0.0, "e": 0.5}, {"w": " two", "s": 1.0, "e": 1.5}]
+        assert cs.sentence_cue(w, 0) is True
+
+    def test_a_capital_after_an_ordinary_word_is_a_cue(self):
+        w = [{"w": " business", "s": 0.0, "e": 0.5}, {"w": " Every", "s": 0.5, "e": 1.0}]
+        assert cs.sentence_cue(w, 0) is True
+
+    @pytest.mark.parametrize("binder", ["the", "a", "of", "my", "in", "and", "The"])
+    def test_a_capital_after_a_binder_is_a_proper_noun_not_a_cue(self, binder):
+        # "that is the | Al-Aqsa Mosque." -- the failure a 30 s split threshold
+        # produced on the documentary. No sentence starts straight after "the".
+        w = [{"w": f" {binder}", "s": 0.0, "e": 0.5},
+             {"w": " Al-Aqsa", "s": 0.5, "e": 1.0}]
+        assert cs.sentence_cue(w, 0) is False
+
+    def test_a_pause_beats_the_binder_guard(self):
+        # The guard only suppresses the CAPITAL signal; a real breath still counts.
+        w = [{"w": " the", "s": 0.0, "e": 0.5}, {"w": " Al-Aqsa", "s": 1.2, "e": 1.7}]
+        assert cs.sentence_cue(w, 0) is True
+
+    def test_i_is_never_a_cue(self):
+        for word in (" I", " I'm", " I’ve"):
+            w = [{"w": " said", "s": 0.0, "e": 0.5}, {"w": word, "s": 0.5, "e": 1.0}]
+            assert cs.sentence_cue(w, 0) is False
+
+    def test_out_of_range_is_false_not_an_error(self):
+        w = [{"w": " one", "s": 0.0, "e": 0.5}]
+        assert cs.sentence_cue(w, 0) is False and cs.sentence_cue(w, -1) is False
+
+
+class TestStartInsideAnUnreachableSentence:
+    """A start deep inside a long unpunctuated stretch."""
+
+    def _run(self):
+        # 30 s with no punctuation at all, one capitalised cue at 20 s.
+        words = []
+        for k in range(60):
+            word = " Every" if k == 40 else f" w{k}"
+            words.append({"w": word, "s": k * 0.5, "e": k * 0.5 + 0.5})
+        words.append({"w": " end.", "s": 30.0, "e": 30.5})
+        return words
+
+    def test_it_opens_on_the_cue_instead_of_mid_phrase(self):
+        # The sentence starts at 0 s and the clip at 24 s -- 24 s back is far
+        # past max_shift, so before this the start simply stayed mid-phrase.
+        words = self._run()
+        start, end = _cut(24.0, 30.5, words=words, lo=5.0, hi=60.0)
+        assert start == pytest.approx(20.0)          # the " Every" cue
+        assert start >= 24.0 - 8.0                   # never further than max_shift
+
+    def test_it_never_moves_the_start_later(self):
+        words = self._run()
+        start, _ = _cut(24.0, 30.5, words=words, lo=5.0, hi=60.0)
+        assert start <= 24.0
+
+    def test_no_cue_in_reach_leaves_the_start_alone(self):
+        # Every word lowercase and contiguous: nothing to snap to, so the
+        # model's own start stands rather than being dragged somewhere worse.
+        words = [{"w": f" w{k}", "s": k * 0.5, "e": k * 0.5 + 0.5} for k in range(60)]
+        words.append({"w": " end.", "s": 30.0, "e": 30.5})
+        start, _ = _cut(24.0, 30.5, words=words, lo=5.0, hi=60.0)
+        assert 23.0 <= start <= 24.5
