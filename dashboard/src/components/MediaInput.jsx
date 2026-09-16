@@ -51,6 +51,13 @@ export default function MediaInput({ onProcess, isProcessing }) {
     const [layout, setLayout] = useState(() => {
         try { return localStorage.getItem('os_layout') || 'auto'; } catch { return 'auto'; }
     });
+    // What kind of video this is. Sits between the global clip rules and the
+    // per-video box below: it says what a good moment looks like in this kind
+    // of content, and anything typed in the box outranks it. Persisted, because
+    // a creator's channel is usually the same niche every time.
+    const [niche, setNiche] = useState(() => {
+        try { return localStorage.getItem('os_niche') || ''; } catch { return ''; }
+    });
     // Download quality for pasted links ("up to"; a video that tops out lower
     // gets its best). Uploads keep their own resolution, so the row is hidden
     // there. Persisted like the layout so a chosen quality sticks.
@@ -128,6 +135,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
             autoHook,
             autoHookStyle,
             layout,
+            niche: niche || null,
             clipInstructions: clipInstructions.trim() || null,
             transcript: useTranscript && transcript.trim() ? transcript : null,
         };
@@ -135,6 +143,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
             localStorage.setItem('os_auto_hook', autoHook ? '1' : '0');
             localStorage.setItem('os_auto_hook_style', autoHookStyle);
             localStorage.setItem('os_layout', layout);
+            localStorage.setItem('os_niche', niche);
             localStorage.setItem('os_quality', quality);
         } catch { /* ignore */ }
         if (mode === 'url' && url) {
@@ -415,6 +424,19 @@ export default function MediaInput({ onProcess, isProcessing }) {
                                 Targets, not guarantees: the AI returns fewer clips when the
                                 material doesn't hold them. Leave blank to let it decide.
                             </p>
+                            <div className="col-span-1 sm:col-span-3 flex flex-wrap items-center justify-between gap-3 pt-3 sm:pt-1 border-t border-rule">
+                                <span className="text-xs text-ink2">what kind of video</span>
+                                <select
+                                    value={niche}
+                                    onChange={(e) => setNiche(e.target.value)}
+                                    className="input-field !w-auto text-xs py-1.5"
+                                    aria-label="what kind of video"
+                                >
+                                    <option value="">General (no preset)</option>
+                                    <option value="tech_podcast">Tech / intellectual podcast</option>
+                                    <option value="creator_chaos">Creator, streamer, vlog</option>
+                                </select>
+                            </div>
                             <div className="col-span-1 sm:col-span-3 flex flex-wrap items-center justify-between gap-3 pt-3 sm:pt-1 border-t border-rule">
                                 <span className="text-xs text-ink2">vertical layout</span>
                                 <select

@@ -26,6 +26,7 @@ from google.genai import types as genai_types
 import gemini_worker
 import layout_picker
 import llm_provider
+import niches
 import transcript_holes
 from clip_selection import (build_transcript_windows, clip_count_targets,
                             clip_duration_bounds, sentence_spans,
@@ -1675,7 +1676,7 @@ def _run_stage_split(client, model_name, items, build_prompt, schema, key, costs
                 + _run_stage_split(client, model_name, items[mid:], build_prompt, schema, key, costs, label))
 
 
-def get_viral_clips(transcript_result, video_duration, instructions=None):
+def get_viral_clips(transcript_result, video_duration, instructions=None, niche=None):
     """Two-pass clip selection: score transcript windows, then detail the best.
 
     Windowing gives even coverage on long videos (a single call over the whole
@@ -1685,7 +1686,9 @@ def get_viral_clips(transcript_result, video_duration, instructions=None):
 
     ``instructions``: the creator's direction (normalized text or None). It goes
     into BOTH passes: scoring is where most of the video is eliminated, so
-    steering only the detail pass would come too late.
+    steering only the detail pass would come too late. ``niche`` is the same,
+    one layer more general — what works in this KIND of video — and sits above
+    the instructions in the prompt, which outrank it.
     """
     print("\U0001f916  Analyzing transcript (2-pass: score → detail)...")
     # Provider choice lives in llm_provider: local Ollama by default, Gemini
@@ -1721,9 +1724,11 @@ def get_viral_clips(transcript_result, video_duration, instructions=None):
             return [{"id": w["id"], "start": w["start"], "end": w["end"], "text": w["text"]} for w in ws]
 
         def _score_prompt(ws):
-            return with_clip_instructions(gemini_worker.SCORE_PROMPT_TEMPLATE.format(
-                video_duration=video_duration, language=language,
-                windows_json=json.dumps(_payload(ws), ensure_ascii=False)),
+            return with_clip_instructions(niches.with_niche(
+                gemini_worker.SCORE_PROMPT_TEMPLATE.format(
+                    video_duration=video_duration, language=language,
+                    windows_json=json.dumps(_payload(ws), ensure_ascii=False)),
+                niche, "score"),
                 instructions, "score")
 
         for b in range(0, len(windows), SCORE_BATCH):
@@ -1780,11 +1785,13 @@ def get_viral_clips(transcript_result, video_duration, instructions=None):
         def _detail_prompt(ws):
             # A split batch keeps the full clip-count band: a short list can
             # still hold the best clips, and the model returns fewer anyway.
-            return with_clip_instructions(gemini_worker.DETAIL_PROMPT_TEMPLATE.format(
-                video_duration=video_duration, language=language,
-                min_clips=min_clips, max_clips=max_clips,
-                min_secs=min_secs, max_secs=max_secs,
-                windows_json=json.dumps(_detail_payload(ws), ensure_ascii=False)),
+            return with_clip_instructions(niches.with_niche(
+                gemini_worker.DETAIL_PROMPT_TEMPLATE.format(
+                    video_duration=video_duration, language=language,
+                    min_clips=min_clips, max_clips=max_clips,
+                    min_secs=min_secs, max_secs=max_secs,
+                    windows_json=json.dumps(_detail_payload(ws), ensure_ascii=False)),
+                niche, "detail"),
                 instructions, "detail")
 
         shorts = _run_stage_split(client, model_name, shortlist, _detail_prompt,
@@ -2142,7 +2149,8 @@ def cut_agent_clips_on_words(transcript, clips):
         clip['end'] = max(p['end'] for p in new)
 
 
-def get_visual_clips(video_path, video_duration, language="en", instructions=None):
+def get_visual_clips(video_path, video_duration, language="en", instructions=None,
+                     niche=None):
     """Clip a SILENT video by vision: Gemini watches the footage and picks the
     most engaging visual moments (no transcript). Returns the same
     {"shorts", "cost_analysis"} shape as get_viral_clips, or None.
@@ -2183,10 +2191,12 @@ def get_visual_clips(video_path, video_duration, language="en", instructions=Non
         v_min_clips = _env_int("CLIP_TARGET_MIN", 3)
         v_max_clips = max(v_min_clips, _env_int("CLIP_TARGET_MAX", 15))
         v_min_secs, v_max_secs = clip_duration_bounds()
-        prompt = with_clip_instructions(gemini_worker.VISUAL_PROMPT_TEMPLATE.format(
-            video_duration=video_duration, language=language,
-            min_clips=v_min_clips, max_clips=v_max_clips,
-            min_secs=v_min_secs, max_secs=v_max_secs), instructions, "visual")
+        prompt = with_clip_instructions(niches.with_niche(
+            gemini_worker.VISUAL_PROMPT_TEMPLATE.format(
+                video_duration=video_duration, language=language,
+                min_clips=v_min_clips, max_clips=v_max_clips,
+                min_secs=v_min_secs, max_secs=v_max_secs),
+            niche, "visual"), instructions, "visual")
         config = genai_types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=gemini_worker.VisualResponse,
@@ -2249,6 +2259,10 @@ if __name__ == '__main__':
     parser.add_argument('--instructions-file', type=str,
                         help="UTF-8 text file with the creator's clip instructions; steers "
                              "every selection stage.")
+    parser.add_argument('--niche', type=str,
+                        help="Name of a niche in niches/ (e.g. tech_podcast, "
+                             "creator_chaos): what counts as a good moment in this "
+                             "KIND of video. The creator's instructions outrank it.")
     parser.add_argument('--transcribe-only', action='store_true',
                         help="Download and transcribe, then stop: the metadata keeps the "
                              "transcript and no clips, for an agent to choose them "
@@ -2281,6 +2295,16 @@ if __name__ == '__main__':
             clip_instructions = clip_instructions[:CLIP_INSTRUCTIONS_MAX_CHARS]
             preview = clip_instructions.replace("\n", " ")
             print(f"🎯 Clip instructions: {preview[:200]}{'…' if len(preview) > 200 else ''}")
+
+    # Same reasoning as the instructions: an unknown niche name fails now,
+    # not after the download. NicheError carries the list of real names.
+    clip_niche = None
+    if args.niche:
+        try:
+            clip_niche = niches.load(args.niche)
+        except niches.NicheError as e:
+            parser.error(str(e))
+        print(f"🎚️  Niche: {args.niche}")
 
     script_start_time = time.time()
     
@@ -2444,9 +2468,11 @@ if __name__ == '__main__':
         elif agent_clips is not None:
             clips_data = {"shorts": agent_clips, "selection": "agent"}
         elif transcript is not None:
-            clips_data = get_viral_clips(transcript, duration, instructions=clip_instructions)
+            clips_data = get_viral_clips(transcript, duration,
+                                         instructions=clip_instructions, niche=clip_niche)
         else:
-            clips_data = get_visual_clips(input_video, duration, instructions=clip_instructions)
+            clips_data = get_visual_clips(input_video, duration,
+                                          instructions=clip_instructions, niche=clip_niche)
 
         if args.transcribe_only:
             pass

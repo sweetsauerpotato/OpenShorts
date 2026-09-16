@@ -810,6 +810,8 @@ function App() {
         auto_hook_style: data.autoHook ? (data.autoHookStyle || 'classic') : null,
         // 'auto' is the server default, so only a deliberate choice travels.
         layouts: data.layout && data.layout !== 'auto' ? data.layout : null,
+        // What kind of video this is; "general" never travels.
+        niche: data.niche || null,
         // Creator instructions for clip selection; blank never travels.
         clip_instructions: data.clipInstructions || null,
         // A transcript the user pasted: the job skips whole-video transcription.

@@ -346,6 +346,7 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 | `tools/compare_selection.py` | Harness that measures clip selection on a cached transcript (see "How clips are chosen") |
 | `transcript_import.py` | Stdlib-only reader for pasted transcripts (YouTube panel, SRT, VTT, JSON) and the clip-range merge of exact words (see "Pasted transcripts") |
 | `transcript_holes.py` | Stdlib-only: the gaps a whole-video Whisper pass dropped, and the closed-choice gate that keeps song lyrics out of what comes back |
+| `niches.py` + `niches/*.md` | Stdlib-only: what counts as a good moment in this KIND of video, between the global rules and the per-video box |
 | `verdicts.py` | Stdlib-only: the user's thumbs on a clip, the closed reason list, and the provenance that lets the data say whether a change helped |
 | `agent_clips.py` | Stdlib-only validation of the clips an agent sends (render_clips) and where their piece edges land |
 | `app.py` | FastAPI server with async job queue and REST endpoints |
@@ -673,6 +674,54 @@ under it.
   landed within 0.06 s of the exact-transcript cut on 3 of 4 edges after the
   fixes above; every piece keeps its first and last word (checked against a
   separate whole-video Whisper run).
+
+### Niches: what a good moment is in this KIND of video (`niches.py`)
+
+Three layers decide what gets clipped, deliberately separate:
+
+  1. `clip_rules.md` — what makes any short work. Global, rarely edited.
+  2. **a niche** — what works in this kind of content. Named, reusable,
+     versioned, improvable from verdict data.
+  3. `clip_instructions` — what the creator wants from THIS video. It wins.
+
+The middle layer was missing: free text in the box is per-video and disappears
+with it, so the same guidance had to be retyped and could never be improved
+from evidence. Shipped: **`tech_podcast`** (claims that contradict consensus,
+concrete numbers, disagreement, admissions; skip agreement chains and
+unresolved hedging) and **`creator_chaos`** (reactions, stunts, physical
+comedy, absurd objects; skip sponsor reads, subscribe pitches and "later in the
+video" teases). `creator_chaos` carries the rule that matters most for this
+pipeline: **the payoff is often non-verbal, so do not end where the talking
+stops** — exactly the failure that cut the body shot at 745.77.
+
+Niches are FILES in `niches/`, like `clip_rules.md`, because they are content
+the user edits and a prompt change should not need a deploy; `.dockerignore`
+re-includes them past `*.md`. Read fresh on every call. The name is matched
+against `^[a-z][a-z0-9_]{1,30}$` and refused otherwise — a name reaches the
+filesystem, so `../../etc/passwd` is refused rather than sanitised — and an
+unknown name is a **400 listing the real ones**, at submit, not a job that
+quietly ran unguided after 20 minutes of work.
+
+`niches.with_niche` inserts its block the same way `with_clip_instructions`
+does: after `.format()`, before the `TRANSCRIPT_LANGUAGE` anchor, so templates
+keep their placeholders and user braces stay inert. **Call it first**, so the
+creator's block lands nearer the data and its "win over the general criteria
+above" wording stays true. No niche returns the prompt byte-identical (tested).
+
+It reaches pass 1, pass 2, `get_visual_clips`, and — because an agent choosing
+clips never goes through those prompts — the first page of `get_transcript`, as
+`{"name", "criteria"}`. `/api/process` takes `niche`, writes `<job>/niche.txt`
+(so a verdict recorded later knows which niche produced the clip) and passes
+`--niche`; MCP `process_video` takes it with an enum built from the files on
+disk. Dashboard: "what kind of video" in advanced options, remembered in
+`localStorage.os_niche`.
+
+Cost: **~723 input tokens per call**, so ~4 calls on a 23.6-min video is
++$0.0008. The instructions precedent says to expect it back — a 56-character
+instruction moved on-topic clips from 1 of 6 to 3 of 3 and made the job
+*cheaper*, because fewer clips means less pass-2 output at 6x the input price.
+**Unmeasured**: whether either niche changes what gets picked. That needs a run
+against the verdict store.
 
 ### Verdicts: what the user thought of a clip (`verdicts.py`)
 

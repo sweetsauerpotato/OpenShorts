@@ -57,6 +57,9 @@ README.md
 *.md
 # ...but not the agent's clip picking rules: /api/transcript serves them.
 !clip_rules.md
+# Niche criteria are prompt content read at job time, not docs.
+!niches/
+!niches/*.md
 
 
 

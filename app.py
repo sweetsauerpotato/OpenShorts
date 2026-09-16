@@ -38,6 +38,7 @@ from agent_clips import normalize_agent_clips, AgentClipsError
 load_dotenv()
 
 # Constants
+import niches
 import verdicts
 
 UPLOAD_DIR = "uploads"
@@ -2241,6 +2242,7 @@ async def process_endpoint(
     upload_id: Optional[str] = Form(None),
     quality: Optional[str] = Form(None),
     clip_instructions: Optional[str] = Form(None),
+    niche: Optional[str] = Form(None),
     selection: Optional[str] = Form(None),
     transcript: Optional[str] = Form(None),
     source_job_id: Optional[str] = Form(None),
@@ -2272,6 +2274,7 @@ async def process_endpoint(
         upload_id = body.get("upload_id")
         quality = body.get("quality")
         clip_instructions = body.get("clip_instructions")
+        niche = body.get("niche")
         selection = body.get("selection")
         transcript = body.get("transcript")
         source_job_id = body.get("source_job_id")
@@ -2300,7 +2303,8 @@ async def process_endpoint(
                                         ("transcript", transcript), ("target_clips", target_clips),
                                         ("clip_min_seconds", clip_min_seconds),
                                         ("clip_max_seconds", clip_max_seconds),
-                                        ("clip_instructions", clip_instructions))
+                                        ("clip_instructions", clip_instructions),
+                                        ("niche", niche))
                  if raw not in (None, "")]
         if extra:
             raise HTTPException(status_code=400, detail=(
@@ -2368,6 +2372,15 @@ async def process_endpoint(
         raise HTTPException(status_code=400, detail=(
             f"clip_instructions must be at most {CLIP_INSTRUCTIONS_MAX_CHARS} characters "
             f"(got {len(instructions)})"))
+
+    # The niche says what a good moment looks like in this KIND of video --
+    # one layer more general than the instructions, which outrank it. Validated
+    # here so a typo is a 400 naming the real niches, not a job that quietly ran
+    # unguided after 20 minutes of work.
+    try:
+        niche_text = niches.load(niche)
+    except niches.NicheError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     # A transcript the user already has (YouTube's transcript panel, SRT/VTT,
     # JSON). It chooses the clips, so the job never transcribes the whole video,
@@ -2678,6 +2691,15 @@ async def process_endpoint(
         cmd.extend(["--instructions-file", instructions_path])
         print(f"[instructions] job={job_id} chars={len(instructions)}")
 
+    if niche_text:
+        # The NAME goes to main.py (it re-reads the file, so an edited niche
+        # takes effect on the next job) and also to disk, so a verdict recorded
+        # later can say which niche produced the clip.
+        with open(os.path.join(job_output_dir, "niche.txt"), "w", encoding="utf-8") as fh:
+            fh.write(str(niche).strip().lower())
+        cmd.extend(["--niche", str(niche).strip().lower()])
+        print(f"[niche] job={job_id} niche={str(niche).strip().lower()}")
+
     if selection == "agent":
         cmd.append("--transcribe-only")
         # What the caller asked the clips to look like, for the render job the
@@ -2894,6 +2916,15 @@ async def get_job_transcript(job_id: str, request: Request, start: Optional[floa
     if start is None:
         result["rules"] = _read_text(CLIP_RULES_PATH)
         result["instructions"] = _read_text(os.path.join(job_dir, "clip_instructions.txt"))
+        # The niche the job was submitted with, in full: an agent choosing clips
+        # from this transcript is the one stage that would otherwise never see
+        # it, since it does not go through the pass-1/pass-2 prompts.
+        niche_name = _read_text(os.path.join(job_dir, "niche.txt"))
+        if niche_name:
+            try:
+                result["niche"] = {"name": niche_name, "criteria": niches.load(niche_name)}
+            except niches.NicheError:
+                result["niche"] = {"name": niche_name, "criteria": None}
     result.update(format="[start-end] sentence, seconds in the source video",
                   sentences=lines, next_start=next_start,
                   stats={"sentences": len(spans), "words": len(word_list)})
@@ -3261,7 +3292,7 @@ def _clip_and_context(job_id):
                      else ("ollama" if str(cost.get("model", "")).startswith("ollama/")
                            else "gemini")),
         "model": cost.get("model"),
-        "niche": None,
+        "niche": _read_text(os.path.join(job_dir, "niche.txt")) or None,
         "source": data.get("source_video"),
         # Not all metadata carries a top-level duration; the transcript's last
         # segment is the honest fallback and is what the length rules use.

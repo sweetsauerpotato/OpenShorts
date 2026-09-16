@@ -21,6 +21,7 @@ Connect with any MCP client, e.g.:
 serves the identical endpoint.)
 """
 import json
+import niches
 import os
 from typing import Optional
 
@@ -150,6 +151,16 @@ TOOLS = [
                 "clip_max_seconds": {
                     "type": "number", "minimum": 10, "maximum": 180,
                     "description": "Maximum clip length in seconds (default 60). Must be ≥ 5s above the minimum.",
+                },
+                "niche": {
+                    "type": "string",
+                    "enum": niches.available(),
+                    "description": "What counts as a good moment in this KIND of video. "
+                                   "'tech_podcast' for interviews and intellectual "
+                                   "conversation (claims, numbers, disagreement); "
+                                   "'creator_chaos' for influencer and streamer content, "
+                                   "where the payoff is often a reaction rather than a "
+                                   "sentence. Optional; clip_instructions outrank it.",
                 },
                 "clip_instructions": {
                     "type": "string", "maxLength": 1000,
@@ -516,7 +527,7 @@ async def _tool_process_video(client, args):
         "webhook_secret": args.get("webhook_secret"),
     }
     for k in ("target_clips", "clip_min_seconds", "clip_max_seconds", "captions", "quality",
-              "clip_instructions", "selection", "transcript"):
+              "clip_instructions", "niche", "selection", "transcript"):
         if args.get(k) is not None:
             body[k] = args[k]
     # Same default as the dashboard: hook on unless the caller opts out. The
