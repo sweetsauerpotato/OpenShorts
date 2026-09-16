@@ -44,6 +44,41 @@ free it) and works as a `source_job_id`.
 
 ---
 
+## 2026-09-17 — `8a54937` fix(clip-selection): the mid-phrase start
+
+**What**: when a clip's sentence opened more than `max_shift` (8 s) ago, the
+START rule fell through and the clip opened wherever pass 2 stopped. It now
+falls back to the same cue the run-on splitter uses, taking the latest one
+within `max_shift`. `sentence_cue` is extracted so both paths cannot drift, and
+gains a **binding guard**: a capitalised word is a boundary only when the word
+before it is not "the", "a", "of", "my", "in", "and"... That binding is what
+made "that is the | Al-Aqsa Mosque." a split point at a 30 s threshold.
+
+**Why**: on the 10-min podcast a clip opened 12.9 s inside an 18.1 s "sentence"
+— "...that was the one time | but on the list of the others mind". 13% of that
+transcript's sentences (15 of 114) run longer than 8 s.
+
+**What the measurement ruled out**: splitting spans cannot fix this.
+`cut_quality` counts only REAL punctuation on purpose ("so the metric cannot
+flatter the cutter"), and there is none to find — every inter-word gap in that
+stretch is 0.00 s and Whisper left no period. Sweeping `max_span_seconds` at
+45/30/25/20/15/12 s gave **identical starts on all three sources** and made
+documentary ends *worse* below 30, so the threshold stays at 45.
+
+**Reverted mid-change**: making `_split_point` return None for a cue-less run.
+It measured as contributing nothing, and an existing test already encodes why
+the middle fallback is there — an end needs a boundary it can reach.
+
+**Verified** over 31 saved answers, no API calls:
+
+    source        ends(punct)  starts(punct)  starts(cue)  outside band
+    documentary      20/21        19/21          20/21          0
+    podcast A         5/5          4/5            5/5           0
+    podcast B         5/5          4/5            5/5           0
+
+Punctuation metrics unchanged (no regression); both podcast bad starts now open
+on a real cue. Start moves median 0.0-0.2 s, never later. 1176 tests (was 1161).
+
 ## 2026-09-17 — `e8830c0` + `1cc060b` the niche works; both rule sets rewritten
 
 **The measurement**: same 10.4-min source, same instructions ("pick the funniest
