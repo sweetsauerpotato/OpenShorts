@@ -112,6 +112,49 @@ change — a wording difference on a prompt block — that the run-to-run noise
 already documented (3/7-4/7 clip agreement) can easily swallow. What *is*
 established is that one of the old starters was a no-op by construction.
 
+### Correction, same day — `27ec34f`: the six angles come back, longer
+
+The entry above deleted six starters on a rule it then broke. **"Only X"
+narrows.** `clip_rules.md` and a niche list many signals as *guidance*; the box
+is a *hard limit*; so `only the disagreements` changes the job even though
+disagreement is on the list. That is exactly the argument the niche chips were
+kept for — and for a video with **no niche selected**, which is what the general
+row is for, there is no middle layer to restate at all.
+
+The one original starter that really failed the test was `skip promo`: it
+**adds** a ban already in force in `clip_rules.md`'s Never list and both Skip
+sections, so ticking it changed nothing. It stays deleted. The distinction that
+matters, and the one the first pass got wrong:
+
+- **narrow** the criteria, or **override** them → a starter
+- **add** a rule already in force → a no-op, and it teaches the user that the
+  box does not work
+
+So `contradictions`, `numbers & names`, `disagreement`, `reactions`, `stories`
+and `how it works` are restored at **roughly double their old length**
+(285-323 characters, was 117-155). Each now names the **near-miss** the model
+would otherwise grab and **where to put the cut** — a vague preset lets it fall
+back on its own taste and return what it would have returned anyway. Three of
+the longest stack to **940 of the box's 1000**; a fourth is skipped whole by
+`addInstructionPreset` rather than truncated mid-sentence.
+
+That made four niche chips duplicates on screen, so each niche now carries only
+what makes no sense outside it. `tech_podcast` drops `only hot takes`, `only
+how it works`, `only the disagreement` and `only stories` for **`the
+prediction`** and **`changed my mind`**, keeping `no jargon` and `keep the
+question`. `creator_chaos` drops `only the reaction`, whose transcript
+signatures (short broken lines, a word repeated fast, crosstalk) moved into the
+general `reactions` text where they serve every video. The editing note inside
+each niche file now says to keep to what makes no sense outside that kind of
+video, since that is where the next person editing one will read it.
+
+General row 10 chips, niche row 4. Verified live under both niches: no label
+appears in both rows. 1196 tests, eslint clean.
+
+`2d14b63` also drops a `~tech_podcast.md.saved.bak` that `git add niches/` had
+swept in — byte-identical to the file it backed up, and `niches/` is scanned at
+runtime, so `*.saved.bak` is gitignored now rather than only deleted.
+
 ## 2026-09-17 — `8a54937` fix(clip-selection): the mid-phrase start
 
 **What**: when a clip's sentence opened more than `max_shift` (8 s) ago, the
