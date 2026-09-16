@@ -44,6 +44,58 @@ free it) and works as a `source_job_id`.
 
 ---
 
+## 2026-09-17 — `e8830c0` + `1cc060b` the niche works; both rule sets rewritten
+
+**The measurement**: same 10.4-min source, same instructions ("pick the funniest
+moments"), niche the only variable.
+
+    niche=tech_podcast  (2bd1b59a)   mean clip 36.1 s
+    niche=(none)        (6100b93c)   mean clip 46.3 s
+
+4 of 5 moments shared; three of those had **identical starts** (207.41, 331.85)
+with the niche version ending 5.8-12.3 s earlier. Titles moved from generic
+("Why Your Brain Hates Unfinished Work") to specific ("The waiter trick that
+explains how your brain works"). **So the niche reaches the model and changes
+its output** — the question from 16-sep is answered.
+
+It also settles the earlier ambiguity: neither run produced funny clips, and the
+source contains zero instances of laugh/joke/funny in 10,539 characters. The
+niche was not overriding the instructions; the video simply has nothing funny.
+
+**But shorter was the wrong direction.** The one clip the user said they would
+post was **50.6 s**, from the longer no-niche set, and the Shorts sweet spot for
+interview content is 45-90 s. Both files now state their own band —
+`tech_podcast` 35-60 s with an explicit "do not cut a clip short",
+`creator_chaos` 15-35 s.
+
+**Rewritten from practice**, not from assumption: the commonest failure is
+starting too early; a concrete number creates the pause that stops a scroll; the
+hook shapes that work are the contradiction, the number, the question the viewer
+already has, the admission. `creator_chaos` now names the **textual** signatures
+of a reaction (short overlapping exclamations, a word repeated fast, crosstalk,
+a price said to someone who did not expect it), because the scorer only ever
+sees a transcript — and keeps the rule the Jake Paul body shot cost us: do not
+end the clip where the talking stops.
+
+**Instruction presets rewritten**: the niche carries "what kind of video", so
+the box carries the angle within it. Every preset is now specific and uses
+only/never, which the prompt treats as a hard limit. The old "pick the funniest
+moments" was vague enough that the model fell back on its own taste.
+
+**Verdicts can be cleared** (`1cc060b`): testing the buttons wrote 6 rows on one
+clip in 8 s because there was no way out of a misclick. Clicking the active
+thumb now clears it, as another append — latest-wins makes it no verdict, the
+history survives, and the counts exclude it.
+
+**Also found, not fixed**: on a pasted transcript, clip 3 of `2bd1b59a` opened
+12.9 s inside an 18.1 s sentence. `snap_clip_to_sentences` has `max_shift` 8 s
+so it cannot reach the opening, and the run-on splitter only fires above 45 s —
+that sentence sits in the gap between them. **13% of that transcript's sentences
+(15/114) are longer than 8 s**, so the exposure is systemic, not a one-off. The
+fix needs measuring against the saved answers, not a guess.
+
+**Verified**: 1161 tests (was 1155), dashboard lint and build.
+
 ## 2026-09-16 — `aedfd65` feat(niches): what a good moment is in this kind of video
 
 **What**: `niches.py` + `niches/*.md`, a third prompt layer between
